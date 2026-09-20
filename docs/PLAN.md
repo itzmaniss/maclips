@@ -16,7 +16,7 @@ Target: single Apple Silicon machine (M4 Pro, 32 GB unified memory), macOS only.
 **What gets built.** A local, semi-automated clipping tool with a browser UI.
 
 1. You give it a long-form source and, for campaigns, the brief.
-2. Within roughly 15 minutes it presents 10–15 ranked, pre-framed, captioned candidate previews. The 15-minute figure is a target, benchmarked in build step 2.
+2. Within roughly 15 minutes it presents 10–15 ranked, pre-framed, captioned candidate previews. **Step 2 measured S2–S4 alone at 16 m 49 s for a 2-hour source (§2.6), so the 15-minute figure is already exceeded before ranking or rendering.** Diarization is 54% of that cost; the §8 candidate-window fallback is the lever, and it is undecided. [V]
 3. You trim, choose a layout, set commentary, and approve.
 4. Approved clips get a single full-quality encode plus an export bundle.
 5. You post manually and log the post URL. The tool tracks submission status.
@@ -331,27 +331,71 @@ upload date and the origin URL go into the source record.
 extractor. It is never upgraded automatically: moving a pinned dependency
 mid-run would invalidate the lockfile everything else is pinned against.
 
-### 2.6 Step 2 measurements, and the gated-model gate [partial]
+### 2.6 Step 2 measurements [V]
 
-Measured on the M4 Pro against a **1h57m46s (7,066 s)** two-person interview,
-2560x1280. **S4 is not yet measured — the run is blocked (see below).**
+Measured on the M4 Pro against a **1h57m46s (7,066 s)** two-person interview
+(2560x1280, 2.00:1). One Claude Code session open; no other heavy process.
+**No swap growth in any stage** — memory pressure stayed `normal` throughout,
+so every timing below reflects compute, not paging.
 
-| stage | wall | vs realtime | source |
+| stage | wall | vs realtime | peak RSS |
 |---|---|---|---|
-| S0 download (2560x1280 + m4a, merged) | ~4m40s | — | 1,150 MiB written |
-| S2 audio extract -> 16 kHz mono WAV | ~24 s | ~295x | 216 MiB WAV |
-| S3 transcribe (Whisper large-v3-turbo, MLX) | **5m17s** | **~22x** | 278 segments, 1.05 s/seg [V] |
-| S3 align (wav2vec2, torch/MPS) | ~3m18s | ~36x | 19,621 words [V] |
-| S4 diarize (pyannote community-1) | **not measured** | — | blocked on repo access |
+| S0 ingest (cache hit) | 1.6 s | — | 277 MB |
+| S2 extract -> 16 kHz mono WAV | 6.5 s | 1090x | 277 MB |
+| S3 transcribe (Whisper large-v3-turbo, MLX) | 335.5 s | 21x | 3.1 GB |
+| S3 align (wav2vec2, torch/MPS) | 123.5 s | 57x | 6.8 GB |
+| **S4 diarize (pyannote community-1, MPS)** | **543.7 s** | **13x** | **8.2 GB** |
+| **S2-S4 total** | **16 m 49 s** | **7.0x** | 8.2 GB peak |
 
-S0 and S2 are wall-clock reconstructions from file timestamps; the S3
-transcribe figure is the loop's own measurement. **Alignment coverage: 100.00%
-of 19,621 words** — far above the 97% gate, which is worth a spot-check rather
-than celebration, since whispermlx interpolates before giving up on a word.
+A cold S0 download of this source took ~4 m 40 s for 1,150 MiB.
 
-S2+S3 together are **~9 minutes for ~2 hours**, so the §8 target of a 10-minute
-S2-S4 budget survives only if diarization is fast. That is exactly the §10
-risk-2 question, and it is still open.
+**The §8 ten-minute target is missed. [V]** S2-S4 cost **16 m 49 s** for a
+2-hour source — 68% over. Diarization alone is **9 m 04 s**, against the
+"flag it above ~5 min per 2 h" threshold: it is **1.8x over**, and it is
+**54% of the whole S2-S4 budget**. Transcription and alignment together
+(7 m 39 s) would fit the target on their own.
+
+This is §10 risk 2 landing, and it makes the §8 fallback live: diarize only the
+candidate windows after ranking, rather than the whole source. **Not
+implemented — the decision is yours.** The arithmetic that favours it: 15
+candidates x ~60 s is ~15 minutes of audio against 118, so diarization would
+drop from ~9 min to roughly 1.2 min at the measured 13x, putting S2-S4 near
+9 minutes. The cost is that ranking then works from an unlabelled transcript.
+
+**MPS vs CPU, measured on a 300 s slice [V].** MPS wins both, decisively, and
+does **not** silently fall back — a fallback would show near-identical times:
+
+| | MPS | CPU | MPS advantage |
+|---|---|---|---|
+| align | 4.9 s | 10.7 s | 2.2x |
+| diarize | 23.8 s | 362.5 s | **15.2x** |
+
+Diarization on CPU runs at 0.8x realtime — slower than the audio itself, i.e.
+~2.5 hours for this source. MPS is not optional here. The slice's diarization
+rate (12.6x) matches the full run's (13.0x), so the cost scales linearly and
+there is no surprise at length.
+
+**Transcript quality [V].** 278 segments, language auto-detected as `en`,
+**19,624 words at 100.00% alignment coverage**. Worth treating with suspicion
+rather than satisfaction: whispermlx interpolates across a sentence before
+giving up on a word, so perfect coverage may mean the 97% gate cannot
+discriminate on clean audio. It will earn its keep on poor audio; do not read
+100% as "alignment is perfect".
+
+**Speaker count: 3 found on a 2-person interview [V].** 2,196 turns, 99.9% of
+words labelled (19,609/19,624). Whether the third label is a real third voice
+(ad read, intro VO, inserted clip) or one speaker split in two is **unresolved
+and needs an ear**. This is precisely what the S4 expected-count gate exists
+for; no count was set for this benchmark, so the gate correctly stayed silent.
+Spot-checks now sample **one excerpt per distinct speaker, rarest first**,
+because three excerpts from the same speaker cannot answer this question.
+
+**Model weights, cached locally [V].** All inference is on-device; Hugging Face
+is only a registry. Whisper large-v3-turbo 1,539 MB and pyannote community-1 +
+segmentation-3.0 in `~/.cache/huggingface`; the wav2vec2 aligner is a
+torchaudio pipeline and lands in `~/.cache/torch` (360 MB) instead — warm both
+for an offline run. `check_access()` short-circuits on a cached copy so the
+gate never forces a network round trip.
 
 **The gated-model gate: `model_info()` is not an access check. [V]**
 
@@ -359,20 +403,10 @@ risk-2 question, and it is still open.
 *metadata* world-readable while file downloads still require accepted terms.
 The first benchmark run proved the difference the expensive way: `model_info()`
 returned happily, the gate passed, S0-S3 ran for eight minutes, and the run
-then died inside `Pipeline.from_pretrained` with
-
-```
-403 Forbidden ... /speaker-diarization-community-1/resolve/main/config.yaml
-Access to model ... is restricted and you are not in the authorized list.
-```
-
-So `check_access()` now fetches `config.yaml` — the file pyannote itself loads
-first — and the benchmark runs that check as a pre-flight **before** S0, not
-before S4. A missing authorization now costs a second instead of eight minutes.
-Diagnostics confirming the cause: the cached token is valid (`whoami` resolves),
-and `pyannote/segmentation-3.0` downloads fine with it; only the gated repo
-403s. The remedy is accepting the conditions on the model page, not a token
-change.
+then died inside `Pipeline.from_pretrained` with a 403 on `config.yaml`. So
+`check_access()` fetches that file — the one pyannote loads first — and the
+benchmark runs the check as a pre-flight **before** S0. A missing authorization
+now costs a second instead of eight minutes.
 
 ---
 
@@ -834,7 +868,7 @@ Each step has a "done when". Arrows show what it blocks.
 
 1. **Attribution accuracy on real podcasts.** Boom mics covering mouths and strong profile angles are the likely failures. The mitigations are structural: split-screen always exists, the confidence gate routes weak clips to it, and step 7 measures before follow-crop ships.
 
-2. **Diarization speed on Apple Silicon.** Still **unmeasured [U]** after build step 2: the run was blocked by the gated-repo access described in §2.6, not by speed. What *is* measured (§2.6) is that S2 + S3 cost ~9 minutes for a 2-hour source, so diarization has roughly one minute of the §8 ten-minute budget before the target is missed — which makes this the live risk it was always expected to be. The mitigation remains the candidate-window-only fallback in §8. Settled by re-running the benchmark once repo access is granted.
+2. **Diarization speed on Apple Silicon — measured, and it is the bottleneck. [V]** pyannote community-1 on MPS runs at **13x realtime: 9 m 04 s for a 2-hour source** (§2.6). That is 54% of the S2-S4 budget and pushes the total to 16 m 49 s against a 10-minute target. The risk landed. CPU is not an alternative (0.8x realtime, ~15x slower than MPS). The mitigation is the candidate-window-only fallback in §8, which the arithmetic says would bring S2-S4 to roughly 9 minutes — **not implemented; awaiting a decision**.
 
 3. **Sameness with other clippers.** Same source, similar tooling, same "best" moments. Duplicate-flagging is reported by a vendor, not verified [U]. Mitigation: whole-source candidate coverage and deliberate differentiation in framing and hooks (§5.6).
 

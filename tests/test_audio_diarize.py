@@ -193,9 +193,15 @@ def test_access_gate_checks_files_not_just_metadata(monkeypatch):
 
 
 def test_access_gate_passes_when_the_file_is_fetchable(monkeypatch):
+    """Not cached, but downloadable: the live check succeeds and returns the sha."""
     from maclips import diarize as d
 
-    monkeypatch.setattr("huggingface_hub.hf_hub_download", lambda *a, **k: "/tmp/config.yaml")
+    def fake_download(repo, filename, **kw):
+        if kw.get("local_files_only"):
+            raise OSError("not in cache")
+        return "/tmp/config.yaml"
+
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", fake_download)
     monkeypatch.setattr("huggingface_hub.model_info", lambda *a, **k: type("I", (), {"sha": "abc123"})())
     assert d.check_access() == "abc123"
 
@@ -210,3 +216,65 @@ def test_access_gate_never_echoes_a_token(monkeypatch):
     with pytest.raises(d.DiarizationAccessError) as excinfo:
         d.check_access()
     assert "hf_abcdefghijklmnop" not in str(excinfo.value)
+
+
+def test_access_gate_is_offline_safe_when_already_cached(monkeypatch):
+    """Cached weights must not need the network (PLAN.md §8: offline use)."""
+    from maclips import diarize as d
+
+    calls = []
+
+    def fake_download(repo, filename, **kw):
+        calls.append(kw.get("local_files_only", False))
+        if kw.get("local_files_only"):
+            return "/cached/config.yaml"
+        raise AssertionError("must not reach the network when the file is cached")
+
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", fake_download)
+    assert d.check_access() == ""
+    assert calls == [True], "only the local-only lookup should run"
+
+
+def test_access_gate_falls_through_to_network_when_not_cached(monkeypatch):
+    from maclips import diarize as d
+
+    calls = []
+
+    def fake_download(repo, filename, **kw):
+        local = kw.get("local_files_only", False)
+        calls.append(local)
+        if local:
+            raise OSError("not in cache")
+        raise _gated_error()
+
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", fake_download)
+    with pytest.raises(d.DiarizationAccessError):
+        d.check_access()
+    assert calls == [True, False], "local lookup first, then the live check"
+
+
+def test_sample_labels_covers_every_speaker_before_repeating():
+    """Three samples from one speaker cannot answer 'is the speaker count right?'."""
+    words = []
+    for i in range(200):
+        words.append(Word(f"a{i}", i * 0.3, i * 0.3 + 0.25, speaker="SPEAKER_00"))
+    for i in range(200, 380):
+        words.append(Word(f"b{i}", i * 0.3, i * 0.3 + 0.25, speaker="SPEAKER_01"))
+    # a small, possibly spurious third label
+    for i in range(380, 395):
+        words.append(Word(f"c{i}", i * 0.3, i * 0.3 + 0.25, speaker="SPEAKER_02"))
+
+    samples = sample_labels(words, count=3)
+    assert {s["speaker"] for s in samples} == {"SPEAKER_00", "SPEAKER_01", "SPEAKER_02"}
+    assert samples[0]["speaker"] == "SPEAKER_02", "rarest speaker first — most suspect"
+    assert samples[0]["word_count"] == 15
+
+
+def test_sample_labels_reports_each_speakers_share():
+    """word_count exposes a label with almost no words, which is the tell."""
+    words = [Word(f"a{i}", i * 0.3, i * 0.3 + 0.25, speaker="SPEAKER_00") for i in range(50)]
+    words += [Word("x", 100.0, 100.3, speaker="SPEAKER_01")]
+    samples = sample_labels(words, count=2)
+    counts = {s["speaker"]: s["word_count"] for s in samples}
+    assert counts["SPEAKER_01"] == 1
+    assert counts["SPEAKER_00"] == 50

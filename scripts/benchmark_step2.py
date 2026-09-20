@@ -134,10 +134,28 @@ def main(target: str) -> int:
     print(f"\nMPS vs CPU on a {SLICE_S:.0f}s slice:")
     print(render_table(compare, audio_duration_s=SLICE_S))
 
+    # Persist the labelled transcript: regenerating spot-checks should never
+    # require re-running a nine-minute diarization pass.
+    import json
+
+    out_json = work / "transcript.json"
+    out_json.write_text(json.dumps({
+        "source": str(rec.path),
+        "duration_s": audio_s,
+        "language": transcript.language,
+        "coverage": transcript.coverage,
+        "speakers": diar.speakers,
+        "turns": [{"start": t.start, "end": t.end, "speaker": t.speaker} for t in diar.turns],
+        "words": [w.as_dict() for w in transcript.words],
+    }, indent=1))
+    print(f"\nlabelled transcript written: {out_json} "
+          f"({out_json.stat().st_size / 2**20:.0f} MiB)")
+
     print("\nspot-checks (verify by ear):")
     for s in s4.sample_labels(transcript.words, count=3):
         mm, ss = divmod(int(s["start"]), 60)
-        print(f"  [{mm:02d}:{ss:02d}] {s['speaker']}: {s['text'][:110]}")
+        print(f"  [{mm:02d}:{ss:02d}] {s['speaker']} ({s['word_count']} words total): "
+              f"{s['text'][:110]}")
 
     swapped = [r.name for r in rows if r.swapped]
     if swapped:

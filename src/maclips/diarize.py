@@ -79,6 +79,17 @@ def check_access(model: str = COMMUNITY_MODEL) -> str:
         "  then `hf auth login`. Metadata being readable is not enough: these\n"
         "  repos are gated:auto, so model_info() succeeds while files 403."
     )
+
+    # Already cached? Then the gate has nothing to add and must not require a
+    # network round trip — PLAN.md §8 wants the weights usable offline, and a
+    # gate that only exists to catch a misconfiguration should not be the
+    # thing that breaks an offline run.
+    try:
+        hf_hub_download(model, "config.yaml", local_files_only=True)
+        return ""
+    except Exception:  # noqa: BLE001 - not cached; fall through to the live check
+        pass
+
     try:
         hf_hub_download(model, "config.yaml")
     except (GatedRepoError, RepositoryNotFoundError) as exc:
@@ -156,23 +167,49 @@ def assign_speakers(words: list[Word], result: DiarizationResult) -> list[Word]:
 
 
 def sample_labels(words: list[Word], count: int = 3) -> list[dict[str, Any]]:
-    """A few labelled excerpts with timestamps, for verifying by ear."""
+    """Labelled excerpts with timestamps, for verifying by ear.
+
+    **One per distinct speaker first.** Sampling by position instead would
+    happily return three excerpts from the same speaker, which cannot answer
+    the question these samples exist for: whether the speaker count is right.
+    A podcast diarized as three voices when two people are talking is the
+    failure worth catching, and it is only visible if every label is shown.
+    """
     labelled = [w for w in words if w.speaker and w.aligned]
     if not labelled:
         return []
+
+    by_speaker: dict[str, list[Word]] = {}
+    for w in labelled:
+        by_speaker.setdefault(w.speaker, []).append(w)
+
+    def excerpt(anchor: Word, pool: list[Word]) -> dict[str, Any] | None:
+        window = [w for w in pool if anchor.start <= w.start < anchor.start + 6.0][:18]
+        if not window:
+            return None
+        return {
+            "speaker": anchor.speaker,
+            "start": window[0].start,
+            "end": window[-1].end,
+            "word_count": len(pool),
+            "text": " ".join(w.word for w in window),
+        }
+
     samples: list[dict[str, Any]] = []
-    step = max(1, len(labelled) // (count + 1))
-    for i in range(count):
-        anchor = labelled[min(step * (i + 1), len(labelled) - 1)]
-        window = [
-            w for w in labelled
-            if w.speaker == anchor.speaker and anchor.start <= w.start < anchor.start + 6.0
-        ][:18]
-        if window:
-            samples.append({
-                "speaker": anchor.speaker,
-                "start": window[0].start,
-                "end": window[-1].end,
-                "text": " ".join(w.word for w in window),
-            })
+    # Rarest speaker first: a spurious third label has the fewest words, and is
+    # the one most worth hearing.
+    for speaker in sorted(by_speaker, key=lambda s: len(by_speaker[s])):
+        pool = by_speaker[speaker]
+        sample = excerpt(pool[len(pool) // 2], pool)
+        if sample:
+            samples.append(sample)
+
+    # Only once every speaker is represented, add more for breadth.
+    if len(samples) < count:
+        step = max(1, len(labelled) // (count + 1))
+        for i in range(count - len(samples)):
+            anchor = labelled[min(step * (i + 1), len(labelled) - 1)]
+            sample = excerpt(anchor, by_speaker[anchor.speaker])
+            if sample:
+                samples.append(sample)
     return samples
