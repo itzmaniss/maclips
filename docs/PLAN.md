@@ -281,8 +281,38 @@ identified. What actually happened:
   estimated as such: install, feed it audio, handle its output shape, and deal
   with the dependency constraint recorded under S4 below.
 
-If a prior orchestrator or transcription stage does exist in another project,
-it was not available to step 1 and nothing here depends on it.
+**Located after the fact [V]:** the transcription/alignment stage this table
+meant is `~/coding/AMC/manim-funnel/src/align/` — `whisper.py` (mlx-whisper
+transcription), `forced.py` (wav2vec2 forced alignment) and `qa.py`.
+**Decision: copy the knowledge, do not share the module.** The contracts are
+opposite. manim-funnel force-aligns a *known* script to TTS audio and its
+aligner raises when the word count disagrees with `Section.words` — that check
+is what validates TTS fidelity. maclips must *discover* unknown speech, so
+there is no prior word list to check against and `whisper.py` discards the
+per-word timings by joining segments to one string. `forced.py` is also bound
+to that project's `schema.Section` / `timing.WordTiming`, so sharing it means
+extracting those too, then adding a mode flag to serve both contracts — the
+"abstraction for later" the Principles rule out. Roughly 15 of its 246 lines
+carry over, as facts rather than code:
+
+- `whispermlx.load_audio(path)` returns an array; pass the array, never the
+  path. **manim-funnel independently hit the §2.4 torchcodec breakage and
+  settled on exactly this workaround** — good corroboration.
+- API surface: `load_model`, `load_align_model(language_code=, device=)`,
+  `align(transcript=, model=, align_model_metadata=, audio=, device=)`, then
+  `result["word_segments"]`.
+- `whispermlx.align` tokenizes with a bare `text.split(" ")` — no punctuation
+  handling of its own. Bears directly on §2.2 item 3, which snaps spans to
+  sentence boundaries *using* punctuation.
+- whispermlx omits `start`/`end` for a word it cannot place, even after
+  interpolating across the sentence. That behaviour is what makes S3's 97%
+  aligned-word-coverage gate measurable.
+- Transcription runs on MLX; alignment stays on torch/MPS.
+- Default model `mlx-community/whisper-large-v3-turbo`.
+
+Note also that manim-funnel pins `torchcodec 0.16.0` against `torch 2.8.0` —
+the broken pair in §2.4. Its call-site workaround masks the breakage rather
+than fixing it; `torchcodec==0.7.0` is the fix if that project wants one.
 
 **A note on the fork's value.** After these replacements, what survives from the fork is a skeleton, one seam, and a prompt draft. Expect it to be a small fraction of the final code. That is fine: the fork is a starting scaffold, not a dependency. Don't let "stay close to upstream" constrain design choices. [I]
 
