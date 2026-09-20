@@ -121,7 +121,7 @@ Each stage checkpoints its output and is cached by content hash (source hash + s
 
 | # | Stage | Output | Hard gate (stops the run or blocks the artifact) |
 |---|---|---|---|
-| S0 | **Ingest**: register source (upload, local path, or URL via yt-dlp), probe with ffprobe | Source record, hash | No video or audio stream; unreadable container; duration under 2 min |
+| S0 | **Ingest**: register source (local path, or URL via yt-dlp's **Python API** — see §2.5), probe with ffprobe | Source record, hash | No video or audio stream; unreadable container; duration below the floor (default 2 min); download failure |
 | S1 | **Brief** (campaign only): paste brief → Haiku extracts config → you confirm in the form | Confirmed campaign config | Unconfirmed brief → S5 will not start. Brief category is crypto/gambling → rejected |
 | S2 | **Audio extract**: ffmpeg to 16 kHz mono WAV | `audio.wav` | — |
 | S3 | **Transcribe + align** (reused, `whispermlx`) | Word-level timestamped transcript | Aligned-word coverage below threshold (e.g. 97%); detected language ≠ expected |
@@ -257,15 +257,122 @@ touched when pyannote is asked to **decode a media file itself**. Therefore:
   `pipeline({"waveform": waveform, "sample_rate": 16000})`.
 - Never pass a path into the diarization pipeline.
 
-**Step 2 action item.** Check how `whispermlx`'s own diarization wrapper
-(`DiarizationPipeline` or equivalent) loads audio. **If it passes a file path
-through to pyannote, do not use it — call pyannote directly** with the
-in-memory waveform. Settle this before benchmarking, because the failure mode
-is an import-time crash inside a library call, not a clear error at the seam.
+**Step 2 action item — SETTLED [V]. `DiarizationPipeline` is safe; no bypass
+needed.** Its `__call__` does:
+
+```python
+if isinstance(audio, str):
+    audio = load_audio(audio)          # its own ffmpeg decode, not torchcodec
+audio_data = {"waveform": torch.from_numpy(audio[None, :]), "sample_rate": SAMPLE_RATE}
+output = self.model(audio_data, ...)   # always the in-memory dict
+```
+
+It never hands pyannote a path — even a string path is decoded first and
+wrapped. pyannote itself emits the matching advice when torchcodec will not
+load ("use audio preloaded in-memory as a `{'waveform': ..., 'sample_rate': ...}`
+dictionary"), which is exactly this design. We pass the array S2 produced, so
+the string branch is never taken either.
+
+**A different trap in the same library, found in step 2 [V]:
+`whispermlx.load_audio` hardcodes a bare `"ffmpeg"` PATH lookup.** On this
+machine that resolves to the broken slim build (§2.3) and fails inside a
+library call. It is never used: `maclips.audio.load_wav` reads the S2 WAV with
+the standard library instead. That is possible precisely because S2 already
+emits 16 kHz mono 16-bit PCM — the format both whispermlx and pyannote want —
+so no decoder is needed at load time and the audio is decoded exactly once per
+run. One array is then shared by S3 and S4 through `RunContext.shared`, which
+is deliberately not checkpointed (a 2-hour waveform is ~450 MB of float32).
 
 Fallback if a decode path is ever genuinely needed: `brew install ffmpeg@7`
 (keg-only) supplies `libavutil.59` without disturbing the ffmpeg-full build
 used for encoding. Not needed under the in-memory-waveform design.
+
+### 2.5 URL ingest (S0) [V]
+
+`uv run maclips ingest <path-or-url>` takes either. URLs go through **yt-dlp's
+Python API**, not a subprocess of a PATH binary — the PATH `ffmpeg` here is a
+broken slim build (§2.3), and yt-dlp must be handed `ffmpeg_location` pointing
+at the configured binary so its merge step uses the same ffmpeg as every other
+stage.
+
+**Dependency.** `yt-dlp[default]`, not plain `yt-dlp`. The extra pulls in
+`yt_dlp_ejs`, which drives YouTube's JavaScript player challenges; those must
+be *executed*, so a JS runtime is required. Deno is that runtime. Two startup
+gates cover this: `deno` on PATH (version reported) and `yt_dlp_ejs`
+importable. Without them extraction either fails or silently degrades to a
+reduced format list.
+
+**Format selection and why height is the number that matters.** A 9:16 crop is
+taken from the source's full *height* (§4.4), so a source of height H yields a
+crop H×9/16 wide. A 1080×1920 final therefore needs **H ≥ 1920** to avoid
+upscaling — not "1080p". The cap is a run argument (`--max-height`, default
+1440) because the right value depends on the source's aspect ratio:
+
+| source aspect | "1080p" means | 9:16 crop width | upscale to 1080 wide? |
+|---|---|---|---|
+| 16:9 | 1920×1080 | 608 px | yes, 1.78× |
+| 16:9 | 2560×1440 | 810 px | yes, 1.33× |
+| 16:9 | 3840×2160 | 1215 px | no |
+| **2:1** | 1920×960 | 540 px | yes, 2.0× |
+| **2:1** | 2560×1280 | 720 px | yes, 1.5× |
+| **2:1** | 3840×1920 | 1080 px | no |
+
+Cinematic 2:1 is common in this material and is *worse* than 16:9 at the same
+nominal label, because the frame is shorter. Check with `maclips probe <url>`,
+which prints each resolution with its aspect and the crop width it would give,
+before committing bandwidth.
+
+**Caching.** The YouTube video id is the key and names the file, so re-ingesting
+the same URL is a cache hit and no bytes are fetched. Title, channel, duration,
+upload date and the origin URL go into the source record.
+
+**Gate.** A download failure stops the run and the message suggests
+`uv lock --upgrade-package yt-dlp` — YouTube breakage is almost always a stale
+extractor. It is never upgraded automatically: moving a pinned dependency
+mid-run would invalidate the lockfile everything else is pinned against.
+
+### 2.6 Step 2 measurements, and the gated-model gate [partial]
+
+Measured on the M4 Pro against a **1h57m46s (7,066 s)** two-person interview,
+2560x1280. **S4 is not yet measured — the run is blocked (see below).**
+
+| stage | wall | vs realtime | source |
+|---|---|---|---|
+| S0 download (2560x1280 + m4a, merged) | ~4m40s | — | 1,150 MiB written |
+| S2 audio extract -> 16 kHz mono WAV | ~24 s | ~295x | 216 MiB WAV |
+| S3 transcribe (Whisper large-v3-turbo, MLX) | **5m17s** | **~22x** | 278 segments, 1.05 s/seg [V] |
+| S3 align (wav2vec2, torch/MPS) | ~3m18s | ~36x | 19,621 words [V] |
+| S4 diarize (pyannote community-1) | **not measured** | — | blocked on repo access |
+
+S0 and S2 are wall-clock reconstructions from file timestamps; the S3
+transcribe figure is the loop's own measurement. **Alignment coverage: 100.00%
+of 19,621 words** — far above the 97% gate, which is worth a spot-check rather
+than celebration, since whispermlx interpolates before giving up on a word.
+
+S2+S3 together are **~9 minutes for ~2 hours**, so the §8 target of a 10-minute
+S2-S4 budget survives only if diarization is fast. That is exactly the §10
+risk-2 question, and it is still open.
+
+**The gated-model gate: `model_info()` is not an access check. [V]**
+
+`pyannote/speaker-diarization-community-1` is `gated: auto`, which makes its
+*metadata* world-readable while file downloads still require accepted terms.
+The first benchmark run proved the difference the expensive way: `model_info()`
+returned happily, the gate passed, S0-S3 ran for eight minutes, and the run
+then died inside `Pipeline.from_pretrained` with
+
+```
+403 Forbidden ... /speaker-diarization-community-1/resolve/main/config.yaml
+Access to model ... is restricted and you are not in the authorized list.
+```
+
+So `check_access()` now fetches `config.yaml` — the file pyannote itself loads
+first — and the benchmark runs that check as a pre-flight **before** S0, not
+before S4. A missing authorization now costs a second instead of eight minutes.
+Diagnostics confirming the cause: the cached token is valid (`whoami` resolves),
+and `pyannote/segmentation-3.0` downloads fine with it; only the gated repo
+403s. The remedy is accepting the conditions on the model page, not a token
+change.
 
 ---
 
@@ -621,7 +728,7 @@ This gives three numbers per source:
 
 1. **Find** the campaign on Whop. This stays manual; the tool doesn't scrape Whop.
 2. **Create** the campaign in the tool by pasting the brief, then confirm the extracted config. If the brief links a Google Doc of guidelines, paste the doc's text. Whop's own guidance recommends brands put guidelines in a shared Google Doc [V]. Fetching it automatically is v2.
-3. **Source in** through Ingest (brand-supplied link or file). Transcription starts immediately.
+3. **Source in** through Ingest — `maclips ingest <path-or-url>`, taking a brand-supplied file or a URL (§2.5). Run `maclips probe <url>` first to check duration and available resolutions before downloading. Transcription starts immediately.
 4. **Review** candidates and approve 3–5.
 5. **Final render and export bundle.**
 6. **Post manually** from the bundle, set the platform's paid-partnership toggle, and **submit the post link on Whop.** Submission is done by pasting the posted video's link [V]. Some briefs require submitting within a set window after posting; one example brief says 30 minutes [V].
@@ -727,7 +834,7 @@ Each step has a "done when". Arrows show what it blocks.
 
 1. **Attribution accuracy on real podcasts.** Boom mics covering mouths and strong profile angles are the likely failures. The mitigations are structural: split-screen always exists, the confidence gate routes weak clips to it, and step 7 measures before follow-crop ships.
 
-2. **Diarization speed on Apple Silicon.** pyannote on MPS for a 2-hour file is unmeasured [U]. If it's slow it breaks the 15-minute target. The mitigation is the candidate-window-only fallback in §8. Settled by step 2's benchmark.
+2. **Diarization speed on Apple Silicon.** Still **unmeasured [U]** after build step 2: the run was blocked by the gated-repo access described in §2.6, not by speed. What *is* measured (§2.6) is that S2 + S3 cost ~9 minutes for a 2-hour source, so diarization has roughly one minute of the §8 ten-minute budget before the target is missed — which makes this the live risk it was always expected to be. The mitigation remains the candidate-window-only fallback in §8. Settled by re-running the benchmark once repo access is granted.
 
 3. **Sameness with other clippers.** Same source, similar tooling, same "best" moments. Duplicate-flagging is reported by a vendor, not verified [U]. Mitigation: whole-source candidate coverage and deliberate differentiation in framing and hooks (§5.6).
 

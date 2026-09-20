@@ -16,6 +16,7 @@ from pathlib import Path
 
 from . import config
 from .gates import EnvironmentGate, check_environment
+from .ingest import DEFAULT_MAX_HEIGHT, IngestError, is_url, probe_url, resolve
 from .orchestrator import RunContext, hash_file, run_pipeline
 from .stages import STAGES, STAGES_BY_ID
 
@@ -32,6 +33,54 @@ def _cmd_check() -> int:
     return 0
 
 
+def _cmd_probe(args: argparse.Namespace) -> int:
+    """Metadata only — judge a source before spending bandwidth on it."""
+    try:
+        meta = probe_url(args.url)
+    except IngestError as exc:
+        print(f"FAILED\n{exc}", file=sys.stderr)
+        return 1
+    d = int(meta.duration_s)
+    print(f"id       : {meta.video_id}")
+    print(f"title    : {meta.title}")
+    print(f"channel  : {meta.channel}")
+    print(f"duration : {d // 3600}h{(d % 3600) // 60:02d}m{d % 60:02d}s ({d}s)")
+    print(f"uploaded : {meta.upload_date}")
+    seen = sorted({(f["width"], f["height"]) for f in meta.formats if f.get("width")},
+                  key=lambda wh: wh[1])
+    print("resolutions:")
+    for w, h in seen:
+        if h >= 240:
+            print(f"  {w}x{h}  (aspect {w / h:.3f}, 9:16 crop would be {int(h * 9 / 16)}px wide)")
+    return 0
+
+
+def _cmd_ingest(args: argparse.Namespace) -> int:
+    """Register a source from a local path or a URL."""
+    try:
+        check_environment()
+    except EnvironmentGate as gate:
+        print(f"FAILED\n{gate}", file=sys.stderr)
+        return 1
+
+    dest = config.WORK_DIR / "sources"
+    try:
+        record = resolve(args.target, dest, max_height=args.max_height)
+    except IngestError as exc:
+        print(f"FAILED\n{exc}", file=sys.stderr)
+        return 2
+
+    size = record.path.stat().st_size / 2**20 if record.path.is_file() else 0
+    print(f"source   : {record.path}")
+    print(f"size     : {size:.0f} MiB")
+    if record.video_id:
+        print(f"id       : {record.video_id}")
+        print(f"title    : {record.title}")
+        print(f"channel  : {record.channel}")
+        print(f"uploaded : {record.upload_date}")
+    return 0
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     try:
         check_environment()
@@ -39,10 +88,21 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print(f"FAILED\n{gate}", file=sys.stderr)
         return 1
 
-    source = Path(args.source).expanduser().resolve()
-    if not source.is_file():
-        print(f"FAILED: no such file: {source}", file=sys.stderr)
-        return 1
+    source_record: dict = {}
+    if is_url(args.source):
+        try:
+            record = resolve(args.source, config.WORK_DIR / "sources",
+                             max_height=args.max_height)
+        except IngestError as exc:
+            print(f"FAILED\n{exc}", file=sys.stderr)
+            return 2
+        source = record.path
+        source_record = record.as_dict()
+    else:
+        source = Path(args.source).expanduser().resolve()
+        if not source.is_file():
+            print(f"FAILED: no such file: {source}", file=sys.stderr)
+            return 1
 
     if args.from_stage and args.from_stage not in STAGES_BY_ID:
         print(f"FAILED: unknown stage {args.from_stage!r}", file=sys.stderr)
@@ -63,6 +123,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             "expected_speaker_count": args.expected_speakers,
             "expected_language": args.language,
             "candidate_count": args.candidates,
+            "source_record": source_record,
         },
     )
 
@@ -85,8 +146,20 @@ def main() -> int:
 
     sub.add_parser("check", help="run the startup environment gates and exit")
 
+    probe = sub.add_parser("probe", help="fetch a URL's metadata only, no download")
+    probe.add_argument("url")
+
+    ing = sub.add_parser("ingest", help="register a source from a local path or a URL")
+    ing.add_argument("target", help="local media file, or a URL")
+    ing.add_argument("--max-height", type=int, default=DEFAULT_MAX_HEIGHT,
+                     help=f"cap source height (default {DEFAULT_MAX_HEIGHT}); "
+                          "a 9:16 crop is height*9/16 wide, so 1080x1920 output "
+                          "needs height>=1920 to avoid upscaling")
+
     run = sub.add_parser("run", help="run the stage pipeline over a source")
-    run.add_argument("source", help="local media file")
+    run.add_argument("source", help="local media file, or a URL")
+    run.add_argument("--max-height", type=int, default=DEFAULT_MAX_HEIGHT,
+                     help="cap source height when the source is a URL")
     run.add_argument("--clip-class", default="general-own",
                      choices=["campaign", "general-own"],
                      help="general-3p is deferred (PLAN.md §1.4)")
@@ -100,6 +173,10 @@ def main() -> int:
     args = parser.parse_args()
     if args.command == "check":
         return _cmd_check()
+    if args.command == "probe":
+        return _cmd_probe(args)
+    if args.command == "ingest":
+        return _cmd_ingest(args)
     return _cmd_run(args)
 
 

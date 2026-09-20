@@ -19,6 +19,8 @@ no hardware abstraction by design (`PLAN.md` §1.3). The startup gates enforce:
 | `python` | exactly 3.12 (whispermlx caps at <3.14, torchcodec 0.7 at ≤3.13) |
 | `ffmpeg-filters` | `ass`, `subtitles`, `drawtext`, `scdet`, `crop`, `scale`, `loudnorm` |
 | `ffmpeg-encoders` | `h264_videotoolbox` (previews), `libx264` (final) |
+| `deno` | on PATH — yt-dlp runs YouTube's JS challenges on it |
+| `yt-dlp-ejs` | importable (needs `yt-dlp[default]`, not plain `yt-dlp`) |
 | `mlx` | MLX default device is the GPU |
 | `torch-mps` | PyTorch can reach the MPS backend |
 | `vision` | `pyobjc-framework-Vision` imports |
@@ -65,11 +67,22 @@ HUGGINGFACE_TOKEN=
 ## Usage
 
 ```sh
-uv run maclips check                    # gates only
-uv run maclips run path/to/source.mp4   # run the stub pipeline
-uv run maclips run source.mp4 --from S5 # recompute from one stage
-uv run pytest                           # 38 tests
+uv run maclips check                       # gates only
+uv run maclips probe <url>                 # metadata only, no download
+uv run maclips ingest <path-or-url>        # register a source
+uv run maclips ingest <url> --max-height 1920
+uv run maclips run <path-or-url>           # run the pipeline
+uv run maclips run source.mp4 --from S5    # recompute from one stage
+uv run pytest                              # 71 tests
 ```
+
+`probe` prints each available resolution with its aspect ratio and the width a
+9:16 crop would have — run it before committing bandwidth. A 9:16 crop comes
+from the source's **height**, so a 1080x1920 output needs source height >= 1920
+to avoid upscaling; for 2:1 cinematic sources (common in podcasts) that means
+the 3840x1920 rendition, not the one labelled "1080p".
+
+Stages S0, S2, S3 and S4 are implemented. S1 and S5-S14 are still stubs.
 
 ## How the orchestrator works
 
@@ -99,6 +112,12 @@ src/maclips/
   llm.py            the single LiteLLM seam
   highlights.py     get_highlights() + llm_fn seam, kept from the fork
   ffmpeg.py         subprocess-only ffmpeg; subclip kept from the fork
+  ingest.py         S0: local path or URL via yt-dlp's Python API
+  audio.py          load the S2 WAV into memory (stdlib; no decoder needed)
+  transcribe.py     S3: whispermlx transcribe + wav2vec2 align
+  diarize.py        S4: pyannote community-1, in-memory waveform only
+  resources.py      release a stage's model before the next one loads
+  bench.py          per-stage wall time, peak RSS, swap, memory pressure
   vision.py         Apple Vision face tracking — stub (build step 6)
   db.py             SQLite schema (PLAN.md §7.3), stdlib sqlite3, no ORM
 docs/

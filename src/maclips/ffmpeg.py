@@ -79,3 +79,23 @@ def cut_subclip(source: Path, start: float, end: float, out_path: Path) -> Path:
         str(out_path),
     ])
     return out_path
+
+
+def extract_audio(source: Path, out_path: Path, sample_rate: int = 16000) -> Path:
+    """S2: decode to 16 kHz mono 16-bit PCM WAV.
+
+    That format is not arbitrary — it is what whispermlx and pyannote both
+    consume, so producing it once here means neither library ever has to decode
+    media itself. This is what keeps torchcodec off the path entirely (§2.4).
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    _run([
+        str(config.FFMPEG), "-y", "-nostdin", "-loglevel", "error",
+        "-i", str(source),
+        "-vn",
+        "-ac", "1",
+        "-ar", str(sample_rate),
+        "-acodec", "pcm_s16le",
+        str(out_path),
+    ])
+    return out_path

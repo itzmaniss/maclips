@@ -11,6 +11,7 @@ S8-S14 in step 5, S6 in step 6, S7 in step 7.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from .orchestrator import GateFailure, RunContext, StageOutput, StageSpec
@@ -49,18 +50,23 @@ def s0_ingest(ctx: RunContext) -> StageOutput:
             "general-3p stays deferred until PLAN.md §9 item 2 is answered.",
         )
 
-    # STUB: build step 5 replaces this with a real ffprobe call.
-    probe = {"duration_s": _cfg(ctx, "stub_duration_s", 3600.0),
-             "has_video": True, "has_audio": True, **STUB}
+    from .ffmpeg import FFmpegError, probe as ffprobe
+
+    record = _cfg(ctx, "source_record") or {}
+    try:
+        probe = ffprobe(ctx.source)
+    except FFmpegError as exc:
+        raise GateFailure("S0", f"unreadable container: {exc}") from exc
+    probe.update({k: v for k, v in record.items() if k != "path"})
 
     if not probe["has_video"] or not probe["has_audio"]:
         missing = "video" if not probe["has_video"] else "audio"
         raise GateFailure("S0", f"source has no {missing} stream.")
-    if probe["duration_s"] < MIN_SOURCE_DURATION_S:
+    floor = float(_cfg(ctx, "min_duration_s", MIN_SOURCE_DURATION_S))
+    if probe["duration_s"] < floor:
         raise GateFailure(
             "S0",
-            f"source is {probe['duration_s']:.0f}s; "
-            f"the floor is {MIN_SOURCE_DURATION_S:.0f}s.",
+            f"source is {probe['duration_s']:.0f}s; the floor is {floor:.0f}s.",
         )
     return {"source_hash": ctx.source_hash, "clip_class": clip_class, **probe}
 
@@ -89,19 +95,46 @@ def s1_brief(ctx: RunContext) -> StageOutput:
 
 def s2_audio_extract(ctx: RunContext) -> StageOutput:
     """ffmpeg to 16 kHz mono WAV. No gate of its own."""
-    # STUB: build step 2. Also the reason diarization never needs torchcodec:
-    # pyannote is handed this waveform in memory, not a media path.
-    return {"audio_path": str(ctx.workdir / "audio.wav"), "sample_rate": 16000, **STUB}
+    from .audio import SAMPLE_RATE
+    from .ffmpeg import FFmpegError, extract_audio
+
+    out = ctx.workdir / "audio.wav"
+    if not out.exists():
+        try:
+            extract_audio(ctx.source, out, sample_rate=SAMPLE_RATE)
+        except FFmpegError as exc:
+            raise GateFailure("S2", f"audio extraction failed: {exc}") from exc
+    return {"audio_path": str(out), "sample_rate": SAMPLE_RATE,
+            "size_bytes": out.stat().st_size}
 
 
 def s3_transcribe(ctx: RunContext) -> StageOutput:
     """Transcribe and align with whispermlx (MLX backend)."""
-    # STUB: build step 2 plugs in whispermlx.
+    from . import transcribe as s3
+
+    waveform = ctx.shared.get("waveform")
+    if waveform is None:
+        from .audio import load_wav
+
+        waveform = load_wav(Path(ctx.output("S2")["audio_path"]))
+        ctx.shared["waveform"] = waveform
+
+    # Transcription always auto-detects. Forcing Whisper to `expected_language`
+    # would make the gate below tautological: the detected language could never
+    # differ from the one we told it to use, so a mislabelled or wrong-language
+    # source would sail through.
+    result = s3.run(
+        waveform,
+        model_name=_cfg(ctx, "whisper_model", s3.DEFAULT_MODEL),
+        language=None,
+        on_stage=ctx.shared.get("on_substage"),
+    )
+    ctx.shared["transcript"] = result
     out = {
-        "words": [],
-        "aligned_coverage": _cfg(ctx, "stub_coverage", 1.0),
-        "language": _cfg(ctx, "stub_language", "en"),
-        **STUB,
+        "words": [w.as_dict() for w in result.words],
+        "aligned_coverage": result.coverage,
+        "language": result.language,
+        "word_count": len(result.words),
     }
     if out["aligned_coverage"] < MIN_ALIGNED_WORD_COVERAGE:
         raise GateFailure(
@@ -120,8 +153,31 @@ def s3_transcribe(ctx: RunContext) -> StageOutput:
 
 def s4_diarize(ctx: RunContext) -> StageOutput:
     """pyannote community-1, exclusive mode; merge speaker labels onto words."""
-    # STUB: build step 2 adds pyannote community-1.
-    out = {"speakers": _cfg(ctx, "stub_speakers", 2), "turns": [], **STUB}
+    from . import diarize as s4
+
+    try:
+        s4.check_access()  # hard gate before any model download
+    except s4.DiarizationAccessError as exc:
+        raise GateFailure("S4", str(exc)) from exc
+
+    waveform = ctx.shared.get("waveform")
+    if waveform is None:
+        from .audio import load_wav
+
+        waveform = load_wav(Path(ctx.output("S2")["audio_path"]))
+        ctx.shared["waveform"] = waveform
+
+    result = s4.diarize(
+        waveform,
+        num_speakers=_cfg(ctx, "expected_speaker_count"),
+        min_speakers=_cfg(ctx, "min_speakers"),
+        max_speakers=_cfg(ctx, "max_speakers"),
+    )
+    transcript = ctx.shared.get("transcript")
+    if transcript is not None:
+        s4.assign_speakers(transcript.words, result)
+        ctx.shared["samples"] = s4.sample_labels(transcript.words)
+    out = {"speakers": len(result.speakers), **result.as_dict()}
     expected = _cfg(ctx, "expected_speaker_count")
     if expected is not None and out["speakers"] != expected:
         raise GateFailure(
@@ -256,7 +312,7 @@ def s14_post_track(ctx: RunContext) -> StageOutput:
 
 STAGES: tuple[StageSpec, ...] = (
     StageSpec("S0", "ingest", "Register + probe the source", s0_ingest,
-              params=("clip_class", "stub_duration_s"),
+              params=("clip_class", "min_duration_s", "source_record"),
               gate="No video/audio stream; unreadable container; duration under 2 min"),
     StageSpec("S1", "brief", "Extract + confirm the campaign brief", s1_brief,
               needs=("S0",), params=("brief",),
@@ -264,10 +320,10 @@ STAGES: tuple[StageSpec, ...] = (
     StageSpec("S2", "audio-extract", "ffmpeg to 16 kHz mono WAV", s2_audio_extract,
               needs=("S0",), gate=""),
     StageSpec("S3", "transcribe", "whispermlx transcript + alignment", s3_transcribe,
-              needs=("S2",), params=("expected_language", "stub_coverage", "stub_language"),
+              needs=("S2",), params=("expected_language", "whisper_model"),
               gate="Aligned-word coverage below 97%; language != expected"),
     StageSpec("S4", "diarize", "pyannote community-1 + word merge", s4_diarize,
-              needs=("S3",), params=("expected_speaker_count", "stub_speakers"),
+              needs=("S3",), params=("expected_speaker_count", "min_speakers", "max_speakers"),
               gate="Speaker count differs from the count you gave"),
     StageSpec("S5", "rank", "Sonnet ranks candidates", s5_rank,
               needs=("S1", "S4"), params=("stub_candidates", "stub_malformed_json"),

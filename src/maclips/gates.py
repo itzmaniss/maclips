@@ -12,6 +12,7 @@ Run them once, before any stage does work:
 from __future__ import annotations
 
 import platform
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -197,10 +198,57 @@ def check_vision(report: GateReport) -> None:
     report.ok("vision", "pyobjc Vision framework importable")
 
 
+def check_deno(report: GateReport) -> None:
+    """yt-dlp's JS challenge solver runs on Deno.
+
+    YouTube serves player challenges that must be executed, not parsed.
+    `yt-dlp[default]` ships `yt_dlp_ejs` to drive them and needs a JS runtime;
+    without one, extraction degrades to formats that may not include the
+    resolutions S0 asks for, or fails outright.
+    """
+    binary = shutil.which("deno")
+    if binary is None:
+        raise EnvironmentGate(
+            "deno",
+            "deno is not on PATH; yt-dlp cannot run YouTube's JS challenges.",
+            "brew install deno",
+        )
+    try:
+        proc = subprocess.run(
+            [binary, "--version"], capture_output=True, text=True, timeout=30, check=False
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise EnvironmentGate("deno", f"could not run `deno --version`: {exc}") from exc
+    version = (proc.stdout or "").splitlines()[0].strip() if proc.stdout else "unknown"
+    report.ok("deno", f"{version} at {binary}")
+
+
+def check_yt_dlp_ejs(report: GateReport) -> None:
+    """The `yt-dlp[default]` extra must actually be installed, not bare yt-dlp."""
+    try:
+        import yt_dlp_ejs  # noqa: F401
+    except ImportError as exc:
+        raise EnvironmentGate(
+            "yt-dlp-ejs",
+            f"yt_dlp_ejs is not importable: {exc}",
+            'the plain `yt-dlp` dependency is not enough — it must be '
+            '`yt-dlp[default]`. Run: uv add "yt-dlp[default]"',
+        ) from exc
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        installed = version("yt-dlp-ejs")
+    except PackageNotFoundError:
+        installed = "unknown"
+    report.ok("yt-dlp-ejs", f"{installed} importable")
+
+
 CHECKS = (
     check_platform,
     check_python,
     check_ffmpeg,
+    check_deno,
+    check_yt_dlp_ejs,
     check_mlx,
     check_torch_mps,
     check_vision,

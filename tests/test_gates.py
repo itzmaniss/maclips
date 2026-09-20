@@ -4,7 +4,15 @@ from __future__ import annotations
 import pytest
 
 from maclips import gates
-from maclips.gates import EnvironmentGate, GateReport, check_ffmpeg, check_platform, check_python
+from maclips.gates import (
+    EnvironmentGate,
+    GateReport,
+    check_deno,
+    check_ffmpeg,
+    check_platform,
+    check_python,
+    check_yt_dlp_ejs,
+)
 
 
 def test_platform_gate_rejects_non_darwin(monkeypatch):
@@ -104,3 +112,56 @@ def test_this_machine_passes_the_real_ffmpeg_gate():
     report = GateReport()
     check_ffmpeg(report)
     assert any("ass, subtitles, drawtext" in line for line in report.passed)
+
+
+# --------------------------------------------------------------------------- #
+# yt-dlp's JS runtime and the [default] extra
+# --------------------------------------------------------------------------- #
+
+def test_deno_gate_fails_when_absent(monkeypatch):
+    monkeypatch.setattr(gates.shutil, "which", lambda name: None)
+    with pytest.raises(EnvironmentGate, match="deno is not on PATH"):
+        check_deno(GateReport())
+
+
+def test_deno_gate_message_names_the_install(monkeypatch):
+    monkeypatch.setattr(gates.shutil, "which", lambda name: None)
+    with pytest.raises(EnvironmentGate, match="brew install deno"):
+        check_deno(GateReport())
+
+
+def test_deno_gate_reports_the_version(monkeypatch):
+    import subprocess as sp
+
+    monkeypatch.setattr(gates.shutil, "which", lambda name: "/opt/homebrew/bin/deno")
+    monkeypatch.setattr(
+        gates.subprocess, "run",
+        lambda *a, **k: sp.CompletedProcess(a[0], 0, stdout="deno 2.9.7 (stable)\nv8 15\n", stderr=""),
+    )
+    report = GateReport()
+    check_deno(report)
+    assert any("deno 2.9.7" in line for line in report.passed)
+
+
+def test_yt_dlp_ejs_gate_fails_when_missing(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def blocked(name, *args, **kwargs):
+        if name == "yt_dlp_ejs":
+            raise ImportError("No module named 'yt_dlp_ejs'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    with pytest.raises(EnvironmentGate) as excinfo:
+        check_yt_dlp_ejs(GateReport())
+    assert 'yt-dlp[default]' in str(excinfo.value), "must name the extra, not plain yt-dlp"
+
+
+def test_this_machine_passes_deno_and_ejs():
+    """Live check: both are actually present in this environment."""
+    report = GateReport()
+    check_deno(report)
+    check_yt_dlp_ejs(report)
+    assert len(report.passed) == 2

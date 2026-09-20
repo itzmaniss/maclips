@@ -1,18 +1,47 @@
-"""S0-S14 stubs: the pipeline runs end to end, and every gate can fire."""
+"""S0-S14: the pipeline runs end to end, and every gate can fire.
+
+S3 and S4 are stubbed here. Their real implementations load multi-gigabyte
+models and (for S4) reach Hugging Face; neither belongs in a unit suite. The
+gates themselves are exercised through the stubs' outputs, which is what the
+gates actually read.
+"""
 from __future__ import annotations
 
 import pytest
 
+from maclips import diarize as diarize_mod
+from maclips import transcribe as transcribe_mod
 from maclips.orchestrator import RunContext, hash_file, run_pipeline
-from maclips.stages import STAGES, STAGES_BY_ID
+from maclips.stages import STAGES
+from maclips.transcribe import Transcript, Word
 
 
-def make_ctx(tmp_path, **config):
-    source = tmp_path / "source.mp4"
-    source.write_bytes(b"stub source bytes")
+@pytest.fixture(autouse=True)
+def no_models(monkeypatch):
+    """Keep every test off the GPU, the model cache and the network."""
+    def fake_run(waveform, model_name=None, language=None, on_stage=None):
+        return Transcript(
+            words=[Word("hello", 0.0, 0.5, 0.9), Word("there", 0.5, 1.0, 0.9)],
+            language=language or "en",
+            segments=[{"start": 0.0, "end": 1.0, "text": "hello there"}],
+        )
+
+    def fake_diarize(waveform, num_speakers=None, **kw):
+        n = num_speakers or 2
+        turns = [diarize_mod.Turn(i * 0.5, (i + 1) * 0.5, f"SPEAKER_{i:02d}") for i in range(n)]
+        return diarize_mod.DiarizationResult(
+            turns=turns, speakers=sorted({t.speaker for t in turns})
+        )
+
+    monkeypatch.setattr(transcribe_mod, "run", fake_run)
+    monkeypatch.setattr(diarize_mod, "diarize", fake_diarize)
+    monkeypatch.setattr(diarize_mod, "check_access", lambda *a, **k: "stub-sha")
+
+
+def make_ctx(tmp_path, source, **config):
     base = {
         "clip_class": "general-own",
-        # S9 is a human gate; an approval stands in for the reviewer.
+        "min_duration_s": 1.0,          # the 3 s fixture is deliberately short
         "approvals": [{"id": "c1", "commentary_mode": "none"}],
     }
     base.update(config)
@@ -29,99 +58,179 @@ def test_all_fifteen_stages_are_registered():
     assert [s.id for s in STAGES] == [f"S{i}" for i in range(15)]
 
 
-def test_stub_pipeline_runs_end_to_end(tmp_path):
-    """Build step 1's 'done when': every stage completes on one file."""
-    report = run_pipeline(make_ctx(tmp_path), STAGES)
+def test_stub_pipeline_runs_end_to_end(tmp_path, tiny_av):
+    report = run_pipeline(make_ctx(tmp_path, tiny_av), STAGES)
     assert report.ok, report.render()
     assert [r.status for r in report.records] == ["ran"] * 15
 
 
-def test_second_end_to_end_run_is_fully_cached(tmp_path):
-    ctx = make_ctx(tmp_path)
+def test_second_end_to_end_run_is_fully_cached(tmp_path, tiny_av):
+    ctx = make_ctx(tmp_path, tiny_av)
     run_pipeline(ctx, STAGES)
     ctx.outputs.clear()
+    ctx.shared.clear()
     report = run_pipeline(ctx, STAGES)
     assert [r.status for r in report.records] == ["cached"] * 15
 
 
 def test_every_declared_gate_is_documented():
-    """A stage that can stop the run must say so; §2.1 lists S2/S8/S13 as gateless."""
     gateless = {s.id for s in STAGES if not s.gate}
     assert gateless == {"S2", "S8", "S13"}
 
 
 # --------------------------------------------------------------------------- #
-# Each gate, fired.
+# S0 gates on real probe data
+# --------------------------------------------------------------------------- #
+
+def test_s0_gates_on_missing_audio_stream(tmp_path, video_only):
+    gated = run_pipeline(make_ctx(tmp_path, video_only), STAGES).gated
+    assert gated is not None and gated.id == "S0"
+    assert "no audio stream" in gated.reason
+
+
+def test_s0_gates_on_short_source_at_the_real_floor(tmp_path, tiny_av):
+    """The 2-minute floor from §2.1, against a genuinely 3-second file."""
+    ctx = make_ctx(tmp_path, tiny_av, min_duration_s=120.0)
+    gated = run_pipeline(ctx, STAGES).gated
+    assert gated is not None and gated.id == "S0"
+    assert "the floor is 120s" in gated.reason
+
+
+def test_s0_gates_on_unreadable_container(tmp_path):
+    junk = tmp_path / "not-media.mp4"
+    junk.write_bytes(b"this is not a container")
+    gated = run_pipeline(make_ctx(tmp_path, junk), STAGES).gated
+    assert gated is not None and gated.id == "S0"
+    assert "unreadable container" in gated.reason
+
+
+# --------------------------------------------------------------------------- #
+# Every other gate, fired
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.parametrize(
     ("stage_id", "config", "expected"),
     [
         ("S0", {"clip_class": "general-3p"}, "not offered"),
-        ("S0", {"stub_duration_s": 45.0}, "the floor is 120s"),
         ("S1", {"clip_class": "campaign", "brief": {"category": "crypto"}}, "rejected"),
         ("S1", {"clip_class": "campaign", "brief": {"category": "saas"}}, "not confirmed"),
-        ("S3", {"stub_coverage": 0.41}, "below 97%"),
-        ("S3", {"stub_language": "en", "expected_language": "fr"}, "!= expected"),
-        ("S4", {"stub_speakers": 3, "expected_speaker_count": 2}, "you expected 2"),
         ("S5", {"stub_malformed_json": True}, "malformed JSON"),
         ("S5", {"stub_candidates": [1, 2, 3]}, "the floor is 5"),
         ("S9", {"approvals": []}, "no clips approved"),
         ("S11", {"stub_compliance_failures": ["duration out of range"]}, "block export"),
     ],
 )
-def test_gate_fires(tmp_path, stage_id, config, expected):
-    report = run_pipeline(make_ctx(tmp_path, **config), STAGES)
+def test_gate_fires(tmp_path, tiny_av, stage_id, config, expected):
+    report = run_pipeline(make_ctx(tmp_path, tiny_av, **config), STAGES)
     gated = report.gated
     assert gated is not None, f"{stage_id} gate did not fire\n{report.render()}"
     assert gated.id == stage_id
     assert expected in gated.reason
 
 
-def test_s10_blocks_unaccepted_commentary(tmp_path):
-    ctx = make_ctx(tmp_path, approvals=[{"id": "c1", "commentary_mode": "auto"}])
+def test_s3_gates_on_low_alignment_coverage(tmp_path, tiny_av, monkeypatch):
+    """whispermlx omits start/end for words it cannot place; that drives coverage."""
+    def sparse(waveform, model_name=None, language=None, on_stage=None):
+        return Transcript(
+            words=[Word("a", 0.0, 0.1, 0.9)] + [Word(f"w{i}") for i in range(9)],
+            language="en",
+        )
+
+    monkeypatch.setattr(transcribe_mod, "run", sparse)
+    gated = run_pipeline(make_ctx(tmp_path, tiny_av), STAGES).gated
+    assert gated is not None and gated.id == "S3"
+    assert "below 97%" in gated.reason and "10.0%" in gated.reason
+
+
+def test_s3_gates_on_unexpected_language(tmp_path, tiny_av, monkeypatch):
+    seen = {}
+
+    def french(waveform, model_name=None, language=None, on_stage=None):
+        seen["language_arg"] = language
+        return Transcript(words=[Word("bonjour", 0.0, 0.5, 0.9)], language="fr")
+
+    monkeypatch.setattr(transcribe_mod, "run", french)
+    ctx = make_ctx(tmp_path, tiny_av, expected_language="en")
+    gated = run_pipeline(ctx, STAGES).gated
+    assert gated is not None and gated.id == "S3"
+    assert "!= expected" in gated.reason
+    assert seen["language_arg"] is None, (
+        "Whisper must auto-detect; forcing it to expected_language would make "
+        "this gate tautological"
+    )
+
+
+def test_s4_gates_on_speaker_count_mismatch(tmp_path, tiny_av, monkeypatch):
+    def three(waveform, num_speakers=None, **kw):
+        turns = [diarize_mod.Turn(i, i + 1, f"SPEAKER_{i:02d}") for i in range(3)]
+        return diarize_mod.DiarizationResult(turns=turns, speakers=[t.speaker for t in turns])
+
+    monkeypatch.setattr(diarize_mod, "diarize", three)
+    ctx = make_ctx(tmp_path, tiny_av, expected_speaker_count=2)
+    gated = run_pipeline(ctx, STAGES).gated
+    assert gated is not None and gated.id == "S4"
+    assert "you expected 2" in gated.reason
+
+
+def test_s4_gates_when_hf_access_is_refused(tmp_path, tiny_av, monkeypatch):
+    def refuse(*a, **k):
+        raise diarize_mod.DiarizationAccessError(
+            "gated model not accepted or token lacks access: pyannote/..."
+        )
+
+    monkeypatch.setattr(diarize_mod, "check_access", refuse)
+    gated = run_pipeline(make_ctx(tmp_path, tiny_av), STAGES).gated
+    assert gated is not None and gated.id == "S4"
+    assert "gated model not accepted or token lacks access" in gated.reason
+
+
+def test_s10_blocks_unaccepted_commentary(tmp_path, tiny_av):
+    ctx = make_ctx(tmp_path, tiny_av, approvals=[{"id": "c1", "commentary_mode": "auto"}])
     gated = run_pipeline(ctx, STAGES).gated
     assert gated is not None and gated.id == "S10"
-    assert "unaccepted" in gated.reason
 
 
-def test_s12_blocks_duration_drift(tmp_path):
+def test_s12_blocks_duration_drift(tmp_path, tiny_av):
     ctx = make_ctx(
-        tmp_path,
+        tmp_path, tiny_av,
         stub_rendered=[{"id": "c1", "planned_duration_s": 42.0, "actual_duration_s": 42.4}],
     )
     gated = run_pipeline(ctx, STAGES).gated
-    assert gated is not None and gated.id == "S12"
-    assert "drifted" in gated.reason
+    assert gated is not None and gated.id == "S12" and "drifted" in gated.reason
 
 
-def test_s14_blocks_campaign_clip_without_disclosure(tmp_path):
+def test_s14_blocks_campaign_clip_without_disclosure(tmp_path, tiny_av):
     ctx = make_ctx(
-        tmp_path,
+        tmp_path, tiny_av,
         clip_class="campaign",
         brief={"category": "saas", "confirmed": True},
         post_rows=[{"clip_id": "c1", "disclosure_ticked": False}],
     )
     gated = run_pipeline(ctx, STAGES).gated
-    assert gated is not None and gated.id == "S14"
-    assert "paid-promotion" in gated.reason
+    assert gated is not None and gated.id == "S14" and "paid-promotion" in gated.reason
 
 
-def test_general_own_clip_needs_no_disclosure(tmp_path):
-    """The disclosure gate is class-scoped; it must not fire on general-own."""
-    ctx = make_ctx(tmp_path, post_rows=[{"clip_id": "c1", "disclosure_ticked": False}])
+def test_general_own_clip_needs_no_disclosure(tmp_path, tiny_av):
+    ctx = make_ctx(tmp_path, tiny_av, post_rows=[{"clip_id": "c1", "disclosure_ticked": False}])
     assert run_pipeline(ctx, STAGES).ok
 
 
-def test_gated_run_resumes_from_the_stage_that_stopped(tmp_path):
-    """A gated run is fixed and re-run from its stage, not from the top."""
-    ctx = make_ctx(tmp_path, stub_coverage=0.41)
-    first = run_pipeline(ctx, STAGES)
+def test_gated_run_resumes_from_the_stage_that_stopped(tmp_path, tiny_av, monkeypatch):
+    def french(waveform, model_name=None, language=None, on_stage=None):
+        return Transcript(words=[Word("bonjour", 0.0, 0.5, 0.9)], language="fr")
+
+    monkeypatch.setattr(transcribe_mod, "run", french)
+    first = run_pipeline(make_ctx(tmp_path, tiny_av, expected_language="en"), STAGES)
     assert first.gated is not None and first.gated.id == "S3"
-    # S0-S2 completed, so they are checkpointed and should come back cached.
     assert [r.status for r in first.records[:3]] == ["ran", "ran", "ran"]
 
-    fixed = make_ctx(tmp_path, stub_coverage=1.0)
-    second = run_pipeline(fixed, STAGES)
-    assert second.ok
+    # Re-patch rather than monkeypatch.undo(): undo() would also revert the
+    # autouse fixture's patches, letting the real check_access reach the network.
+    monkeypatch.setattr(
+        transcribe_mod, "run",
+        lambda w, model_name=None, language=None, on_stage=None: Transcript(
+            words=[Word("hello", 0.0, 0.5, 0.9)], language="en"),
+    )
+    second = run_pipeline(make_ctx(tmp_path, tiny_av, expected_language="en"), STAGES)
+    assert second.ok, second.render()
     assert [r.status for r in second.records[:3]] == ["cached", "cached", "cached"]
