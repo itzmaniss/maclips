@@ -12,8 +12,7 @@ import json
 import subprocess
 from pathlib import Path
 
-FFMPEG = "ffmpeg"
-FFPROBE = "ffprobe"
+from . import config
 
 
 class FFmpegError(RuntimeError):
@@ -24,12 +23,12 @@ def _run(cmd: list[str], timeout: float = 3600.0) -> subprocess.CompletedProcess
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired as exc:
-        raise FFmpegError(f"{cmd[0]} timed out after {timeout:.0f}s") from exc
+        raise FFmpegError(f"{Path(cmd[0]).name} timed out after {timeout:.0f}s") from exc
     except OSError as exc:
         raise FFmpegError(f"could not execute {cmd[0]}: {exc}") from exc
     if proc.returncode != 0:
         tail = (proc.stderr or "").strip().splitlines()[-8:]
-        raise FFmpegError(f"{cmd[0]} exited {proc.returncode}:\n" + "\n".join(tail))
+        raise FFmpegError(f"{Path(cmd[0]).name} exited {proc.returncode}:\n" + "\n".join(tail))
     return proc
 
 
@@ -45,7 +44,7 @@ def parse_ratio(aspect_ratio: str) -> float:
 def probe(path: Path) -> dict:
     """ffprobe a source into the dict S0 gates on."""
     proc = _run(
-        [FFPROBE, "-v", "error", "-print_format", "json",
+        [str(config.FFPROBE), "-v", "error", "-print_format", "json",
          "-show_format", "-show_streams", str(path)],
         timeout=120.0,
     )
@@ -71,7 +70,7 @@ def cut_subclip(source: Path, start: float, end: float, out_path: Path) -> Path:
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     _run([
-        FFMPEG, "-y", "-loglevel", "error",
+        str(config.FFMPEG), "-y", "-loglevel", "error",
         "-ss", f"{start:.3f}",
         "-to", f"{end:.3f}",
         "-i", str(source),

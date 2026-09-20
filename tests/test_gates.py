@@ -62,17 +62,45 @@ def test_ffmpeg_gate_passes_when_everything_present(monkeypatch):
     encoders = " ".join(gates.REQUIRED_FFMPEG_ENCODERS)
 
     monkeypatch.setattr(gates, "_ffmpeg_list", lambda kind: filters if kind == "filters" else encoders)
-    monkeypatch.setattr(gates.shutil, "which", lambda name: f"/usr/bin/{name}")
     report = GateReport()
     check_ffmpeg(report)
     assert report.passed
 
 
-def test_this_machine_currently_fails_the_ffmpeg_gate():
-    """Documents a real, outstanding defect: Homebrew's ffmpeg has no libass.
-
-    Delete this test once `ffmpeg-full` is installed — at which point
-    `test_ffmpeg_gate_passes_when_everything_present` is the live check.
-    """
-    with pytest.raises(EnvironmentGate, match="missing required filter"):
+def test_ffmpeg_gate_fails_when_configured_binary_is_absent(monkeypatch, tmp_path):
+    """A missing binary at the configured path is a gate failure, not a PATH fallback."""
+    monkeypatch.setattr(gates.config, "FFMPEG", tmp_path / "nope" / "ffmpeg")
+    with pytest.raises(EnvironmentGate, match="no ffmpeg at the configured path"):
         check_ffmpeg(GateReport())
+
+
+def test_ffmpeg_gate_fails_when_ffprobe_is_absent(monkeypatch, tmp_path):
+    filters = " ".join(f" {f} " for f in gates.REQUIRED_FFMPEG_FILTERS)
+    encoders = " ".join(gates.REQUIRED_FFMPEG_ENCODERS)
+    monkeypatch.setattr(gates, "_ffmpeg_list", lambda kind: filters if kind == "filters" else encoders)
+    monkeypatch.setattr(gates.config, "FFPROBE", tmp_path / "nope" / "ffprobe")
+    with pytest.raises(EnvironmentGate, match="no ffprobe at the configured path"):
+        check_ffmpeg(GateReport())
+
+
+def test_gate_probes_the_configured_binary_not_path(monkeypatch):
+    """The gate and the pipeline must never disagree about which ffmpeg is in use."""
+    seen = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(cmd[0])
+        import subprocess as sp
+        return sp.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(gates.subprocess, "run", fake_run)
+    with pytest.raises(EnvironmentGate):
+        check_ffmpeg(GateReport())
+    assert seen and seen[0] == str(gates.config.FFMPEG)
+    assert seen[0] != "ffmpeg", "must use an absolute configured path, not bare PATH lookup"
+
+
+def test_this_machine_passes_the_real_ffmpeg_gate():
+    """The live check against the actually-configured ffmpeg-full build."""
+    report = GateReport()
+    check_ffmpeg(report)
+    assert any("ass, subtitles, drawtext" in line for line in report.passed)

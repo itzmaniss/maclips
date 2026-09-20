@@ -56,6 +56,27 @@ DIARIZATION_MODEL = os.getenv(
 HF_TOKEN_ENV = "HUGGINGFACE_TOKEN"  # community-1 is a gated download
 
 # --------------------------------------------------------------------------- #
+# ffmpeg binaries
+# --------------------------------------------------------------------------- #
+# Homebrew's default `ffmpeg` formula is built without libass, freetype or
+# fontconfig, so `ass`, `subtitles` and `drawtext` are all absent from it —
+# which kills burned captions and the hook/commentary overlays. `ffmpeg-full`
+# has them but is keg-only, so it is never on PATH.
+#
+# We therefore address it by absolute path rather than touching PATH. Every
+# ffmpeg and ffprobe call in this project resolves through these two settings,
+# and the startup gate probes these same binaries, so the gate can never pass
+# against a different build than the pipeline runs.
+FFMPEG_FULL_PREFIX = Path("/opt/homebrew/opt/ffmpeg-full/bin")
+
+FFMPEG = Path(
+    os.getenv("MACLIPS_FFMPEG", FFMPEG_FULL_PREFIX / "ffmpeg")
+).expanduser()
+FFPROBE = Path(
+    os.getenv("MACLIPS_FFPROBE", FFMPEG_FULL_PREFIX / "ffprobe")
+).expanduser()
+
+# --------------------------------------------------------------------------- #
 # Paths
 # --------------------------------------------------------------------------- #
 WORK_DIR = Path(os.getenv("MACLIPS_WORK_DIR", PROJECT_ROOT / "work")).expanduser()

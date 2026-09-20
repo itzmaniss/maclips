@@ -12,10 +12,11 @@ Run them once, before any stage does work:
 from __future__ import annotations
 
 import platform
-import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
+
+from . import config
 
 # Filters the render pipeline cannot do without. `ass` burns the word-highlight
 # captions (PLAN.md §2.3) and `drawtext` draws the hook and commentary
@@ -53,17 +54,22 @@ class GateReport:
 
 
 def _ffmpeg_list(kind: str) -> str:
-    """Return `ffmpeg -filters` or `-encoders` output, or raise EnvironmentGate."""
-    binary = shutil.which("ffmpeg")
-    if binary is None:
+    """Return `ffmpeg -filters` or `-encoders` output, or raise EnvironmentGate.
+
+    Probes the *configured* binary (config.FFMPEG), never PATH, so the gate
+    cannot pass against a build the pipeline will not use.
+    """
+    binary = config.FFMPEG
+    if not binary.is_file():
         raise EnvironmentGate(
             "ffmpeg-present",
-            "ffmpeg is not on PATH.",
-            "brew install ffmpeg-full  (the slim `ffmpeg` formula lacks libass)",
+            f"no ffmpeg at the configured path: {binary}",
+            "brew install ffmpeg-full, or point MACLIPS_FFMPEG at a build that "
+            "has libass (the slim `ffmpeg` formula does not).",
         )
     try:
         proc = subprocess.run(
-            [binary, "-hide_banner", f"-{kind}"],
+            [str(binary), "-hide_banner", f"-{kind}"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -113,17 +119,20 @@ def check_python(report: GateReport) -> None:
 
 def check_ffmpeg(report: GateReport) -> None:
     """ffmpeg must be able to burn captions and use both encoders."""
+    binary = config.FFMPEG
     filters = _ffmpeg_list("filters")
     missing = [f for f in REQUIRED_FFMPEG_FILTERS if f" {f} " not in filters]
     if missing:
         raise EnvironmentGate(
             "ffmpeg-filters",
             f"ffmpeg is missing required filter(s): {', '.join(missing)}.",
-            "brew install ffmpeg-full && export PATH=\"$(brew --prefix ffmpeg-full)/bin:$PATH\"\n"
-            "       Homebrew's default `ffmpeg` formula is built without libass, "
-            "freetype or fontconfig, so `ass`, `subtitles` and `drawtext` are absent.",
+            f"{binary} lacks them. Homebrew's default `ffmpeg` formula is built "
+            "without libass, freetype or fontconfig, so `ass`, `subtitles` and "
+            "`drawtext` are absent. Install ffmpeg-full (keg-only, no PATH change "
+            "needed) or point MACLIPS_FFMPEG at a build that has them.",
         )
 
+    binary = config.FFMPEG
     encoders = _ffmpeg_list("encoders")
     missing_enc = [e for e in REQUIRED_FFMPEG_ENCODERS if e not in encoders]
     if missing_enc:
@@ -133,13 +142,15 @@ def check_ffmpeg(report: GateReport) -> None:
             "brew install ffmpeg-full",
         )
 
-    if shutil.which("ffprobe") is None:
+    if not config.FFPROBE.is_file():
         raise EnvironmentGate(
             "ffprobe-present",
-            "ffprobe is not on PATH; S0 cannot probe sources without it.",
-            "brew install ffmpeg-full",
+            f"no ffprobe at the configured path: {config.FFPROBE}; "
+            "S0 cannot probe sources without it.",
+            "brew install ffmpeg-full, or set MACLIPS_FFPROBE.",
         )
-    report.ok("ffmpeg", "ass, subtitles, drawtext, scdet + videotoolbox/libx264 present")
+    report.ok("ffmpeg", f"{binary} — ass, subtitles, drawtext, scdet, loudnorm "
+                        "+ libx264/h264_videotoolbox")
 
 
 def check_mlx(report: GateReport) -> None:
