@@ -89,14 +89,23 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return 1
 
     source_record: dict = {}
+    record = None
     if is_url(args.source):
+        import time
+
+        started = time.perf_counter()
+
+        def audio_ready(path: Path) -> None:
+            print(f"audio ready after {time.perf_counter() - started:.1f}s: {path.name} "
+                  f"— S2 can start; video still downloading", flush=True)
+
         try:
             record = resolve(args.source, config.WORK_DIR / "sources",
-                             max_height=args.max_height)
+                             max_height=args.max_height, on_audio_ready=audio_ready)
         except IngestError as exc:
             print(f"FAILED\n{exc}", file=sys.stderr)
             return 2
-        source = record.path
+        source = record.audio_source
         source_record = record.as_dict()
     else:
         source = Path(args.source).expanduser().resolve()
@@ -124,8 +133,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
             "expected_language": args.language,
             "candidate_count": args.candidates,
             "source_record": source_record,
+            "full_diarization": args.full_diarization,
         },
     )
+    if record is not None:
+        # S6 needs this to wait for the video stream; it is an object, not
+        # checkpointable state, so it goes in `shared`.
+        ctx.shared["source_record"] = record
 
     print(f"run {run_id}  source {source.name}  hash {source_hash[:16]}")
     report = run_pipeline(ctx, STAGES, from_stage=args.from_stage)
@@ -169,6 +183,10 @@ def main() -> int:
                      help="enables the S4 speaker-count gate")
     run.add_argument("--language", default=None, help="enables the S3 language gate")
     run.add_argument("--candidates", type=int, default=12)
+    run.add_argument("--full-diarization", action="store_true",
+                     help="diarize the whole source instead of candidate windows. "
+                          "Slow (9m per 2h, measured) and not the default; kept for "
+                          "the step-4 ranking comparison and cross-source speaker identity")
 
     args = parser.parse_args()
     if args.command == "check":

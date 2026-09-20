@@ -26,15 +26,24 @@ def no_models(monkeypatch):
             segments=[{"start": 0.0, "end": 1.0, "text": "hello there"}],
         )
 
-    def fake_diarize(waveform, num_speakers=None, **kw):
-        n = num_speakers or 2
-        turns = [diarize_mod.Turn(i * 0.5, (i + 1) * 0.5, f"SPEAKER_{i:02d}") for i in range(n)]
+    def _result(n=2):
+        turns = [diarize_mod.Turn(i * 10.0, (i + 1) * 10.0, f"SPEAKER_{i:02d}") for i in range(n)]
         return diarize_mod.DiarizationResult(
             turns=turns, speakers=sorted({t.speaker for t in turns})
         )
 
+    def fake_diarize(waveform, max_speakers=None, **kw):
+        return _result()
+
+    def fake_windows(waveform, spans, **kw):
+        return [
+            diarize_mod.Window(i, s, e, _result())
+            for i, (s, e) in enumerate(spans)
+        ]
+
     monkeypatch.setattr(transcribe_mod, "run", fake_run)
     monkeypatch.setattr(diarize_mod, "diarize", fake_diarize)
+    monkeypatch.setattr(diarize_mod, "diarize_windows", fake_windows)
     monkeypatch.setattr(diarize_mod, "check_access", lambda *a, **k: "stub-sha")
 
 
@@ -43,6 +52,10 @@ def make_ctx(tmp_path, source, **config):
         "clip_class": "general-own",
         "min_duration_s": 1.0,          # the 3 s fixture is deliberately short
         "approvals": [{"id": "c1", "commentary_mode": "none"}],
+        # S4 is window-only now and needs spans from S5; S5's own gate wants >=5.
+        "stub_candidates": [
+            {"start": i * 0.4, "end": i * 0.4 + 0.3} for i in range(5)
+        ],
     }
     base.update(config)
     return RunContext(
@@ -55,7 +68,19 @@ def make_ctx(tmp_path, source, **config):
 
 
 def test_all_fifteen_stages_are_registered():
-    assert [s.id for s in STAGES] == [f"S{i}" for i in range(15)]
+    assert sorted((s.id for s in STAGES), key=lambda i: int(i[1:])) == [
+        f"S{i}" for i in range(15)
+    ]
+
+
+def test_s4_runs_after_s5_because_diarization_is_window_only():
+    """Execution order, not id order: S4 needs S5's candidate spans (§2.2)."""
+    order = [s.id for s in STAGES]
+    assert order.index("S5") < order.index("S4")
+    by_id = {s.id: s for s in STAGES}
+    assert by_id["S4"].needs == ("S5",)
+    assert "S4" not in by_id["S5"].needs, "S5 must not wait on diarization"
+    assert by_id["S5"].needs == ("S1", "S3")
 
 
 def test_stub_pipeline_runs_end_to_end(tmp_path, tiny_av):
@@ -128,18 +153,40 @@ def test_gate_fires(tmp_path, tiny_av, stage_id, config, expected):
     assert expected in gated.reason
 
 
-def test_s3_gates_on_low_alignment_coverage(tmp_path, tiny_av, monkeypatch):
-    """whispermlx omits start/end for words it cannot place; that drives coverage."""
-    def sparse(waveform, model_name=None, language=None, on_stage=None):
+def test_s3_gates_on_weak_alignment_not_coverage(tmp_path, tiny_av, monkeypatch):
+    """Interpolated words carry timings but no score — coverage cannot see them."""
+    def interpolated(waveform, model_name=None, language=None, on_stage=None):
+        # every word has start/end (so coverage is 100%) but no score
         return Transcript(
-            words=[Word("a", 0.0, 0.1, 0.9)] + [Word(f"w{i}") for i in range(9)],
+            words=[Word(f"w{i}", i * 0.1, i * 0.1 + 0.05) for i in range(10)],
             language="en",
         )
 
-    monkeypatch.setattr(transcribe_mod, "run", sparse)
-    gated = run_pipeline(make_ctx(tmp_path, tiny_av), STAGES).gated
+    monkeypatch.setattr(transcribe_mod, "run", interpolated)
+    report = run_pipeline(make_ctx(tmp_path, tiny_av), STAGES)
+    gated = report.gated
     assert gated is not None and gated.id == "S3"
-    assert "below 97%" in gated.reason and "10.0%" in gated.reason
+    assert "weakly aligned" in gated.reason
+    assert "10 interpolated" in gated.reason
+
+
+def test_s3_coverage_alone_would_not_have_fired(tmp_path, tiny_av, monkeypatch):
+    """The old gate's blind spot, pinned so it cannot return."""
+    words = [Word(f"w{i}", i * 0.1, i * 0.1 + 0.05) for i in range(10)]
+    t = Transcript(words=words, language="en")
+    assert t.coverage == 1.0, "interpolated words look perfect to coverage"
+    assert t.weak_fraction(0.3) == 1.0, "but every one is weakly aligned"
+
+
+def test_s3_passes_when_words_are_acoustically_aligned(tmp_path, tiny_av, monkeypatch):
+    def good(waveform, model_name=None, language=None, on_stage=None):
+        return Transcript(
+            words=[Word(f"w{i}", i * 0.1, i * 0.1 + 0.05, 0.9) for i in range(20)],
+            language="en",
+        )
+
+    monkeypatch.setattr(transcribe_mod, "run", good)
+    assert run_pipeline(make_ctx(tmp_path, tiny_av), STAGES).ok
 
 
 def test_s3_gates_on_unexpected_language(tmp_path, tiny_av, monkeypatch):
@@ -160,16 +207,44 @@ def test_s3_gates_on_unexpected_language(tmp_path, tiny_av, monkeypatch):
     )
 
 
-def test_s4_gates_on_speaker_count_mismatch(tmp_path, tiny_av, monkeypatch):
-    def three(waveform, num_speakers=None, **kw):
-        turns = [diarize_mod.Turn(i, i + 1, f"SPEAKER_{i:02d}") for i in range(3)]
-        return diarize_mod.DiarizationResult(turns=turns, speakers=[t.speaker for t in turns])
+def test_s4_gates_on_significant_speaker_count(tmp_path, tiny_av, monkeypatch):
+    """Three substantial speakers where two were expected."""
+    def three(waveform, spans, **kw):
+        turns = [diarize_mod.Turn(i * 10.0, (i + 1) * 10.0, f"SPEAKER_{i:02d}") for i in range(3)]
+        result = diarize_mod.DiarizationResult(turns=turns, speakers=[t.speaker for t in turns])
+        return [diarize_mod.Window(0, spans[0][0], spans[0][1], result)]
 
-    monkeypatch.setattr(diarize_mod, "diarize", three)
+    monkeypatch.setattr(diarize_mod, "diarize_windows", three)
     ctx = make_ctx(tmp_path, tiny_av, expected_speaker_count=2)
     gated = run_pipeline(ctx, STAGES).gated
     assert gated is not None and gated.id == "S4"
     assert "you expected 2" in gated.reason
+    assert ">=5%" in gated.reason
+
+
+def test_s4_sliver_label_does_not_trip_the_count_gate(tmp_path, tiny_av, monkeypatch):
+    """A 1% backchannel label is not a third speaker."""
+    def two_plus_sliver(waveform, spans, **kw):
+        turns = [
+            diarize_mod.Turn(0.0, 50.0, "SPEAKER_00"),
+            diarize_mod.Turn(50.0, 99.0, "SPEAKER_01"),
+            diarize_mod.Turn(99.0, 100.0, "SPEAKER_02"),   # 1% — noise
+        ]
+        result = diarize_mod.DiarizationResult(
+            turns=turns, speakers=["SPEAKER_00", "SPEAKER_01", "SPEAKER_02"]
+        )
+        return [diarize_mod.Window(0, spans[0][0], spans[0][1], result)]
+
+    monkeypatch.setattr(diarize_mod, "diarize_windows", two_plus_sliver)
+    ctx = make_ctx(tmp_path, tiny_av, expected_speaker_count=2)
+    assert run_pipeline(ctx, STAGES).ok, "raw label count would have failed this"
+
+
+def test_s4_gates_when_s5_produced_no_spans(tmp_path, tiny_av):
+    ctx = make_ctx(tmp_path, tiny_av, stub_candidates=[])
+    gated = run_pipeline(ctx, STAGES).gated
+    assert gated is not None and gated.id == "S4"
+    assert "no candidate spans" in gated.reason
 
 
 def test_s4_gates_when_hf_access_is_refused(tmp_path, tiny_av, monkeypatch):

@@ -16,7 +16,7 @@ Target: single Apple Silicon machine (M4 Pro, 32 GB unified memory), macOS only.
 **What gets built.** A local, semi-automated clipping tool with a browser UI.
 
 1. You give it a long-form source and, for campaigns, the brief.
-2. Within roughly 15 minutes it presents 10–15 ranked, pre-framed, captioned candidate previews. **Step 2 measured S2–S4 alone at 16 m 49 s for a 2-hour source (§2.6), so the 15-minute figure is already exceeded before ranking or rendering.** Diarization is 54% of that cost; the §8 candidate-window fallback is the lever, and it is undecided. [V]
+2. Within roughly 15 minutes it presents 10–15 ranked, pre-framed, captioned candidate previews. **Measured after the step-2b restructure: ~8.2–8.9 minutes from a cold start to candidates** on a 2-hour source (§2.6b) — S0 audio 26 s, S2+S3 7 m 28 s, plus an assumed 20–60 s of ranking. That leaves roughly 6 minutes of the 15 for preview rendering, which is unmeasured. [V for everything up to ranking]
 3. You trim, choose a layout, set commentary, and approve.
 4. Approved clips get a single full-quality encode plus an export bundle.
 5. You post manually and log the post URL. The tool tracks submission status.
@@ -117,17 +117,19 @@ The approval and projection thresholds are starting points [I]. Revise them afte
 
 ### 2.1 Stages
 
-Each stage checkpoints its output and is cached by content hash (source hash + stage parameters), using your existing orchestrator pattern. "Gate" means the stage stops. It does not warn and continue.
+Each stage checkpoints its output and is cached by content hash (source hash + stage parameters). "Gate" means the stage stops. It does not warn and continue.
+
+**Execution order is `S0 S1 S2 S3 S5 S4 S6 …`** — S4 runs after S5 because diarization is window-only and needs the candidate spans (§2.2 item 1). The ids keep their original meaning; only the order changed.
 
 | # | Stage | Output | Hard gate (stops the run or blocks the artifact) |
 |---|---|---|---|
-| S0 | **Ingest**: register source (local path, or URL via yt-dlp's **Python API** — see §2.5), probe with ffprobe | Source record, hash | No video or audio stream; unreadable container; duration below the floor (default 2 min); download failure |
+| S0 | **Ingest**: local path, or URL via yt-dlp's **Python API** as **two separate streams** — audio first (S2 starts on it), video concurrently, never muxed (§2.5) | Source record with `audio_path` + `video_path`, hash | No video or audio stream; unreadable container; duration below the floor (default 2 min); download failure |
 | S1 | **Brief** (campaign only): paste brief → Haiku extracts config → you confirm in the form | Confirmed campaign config | Unconfirmed brief → S5 will not start. Brief category is crypto/gambling → rejected |
 | S2 | **Audio extract**: ffmpeg to 16 kHz mono WAV | `audio.wav` | — |
-| S3 | **Transcribe + align** (reused, `whispermlx`) | Word-level timestamped transcript | Aligned-word coverage below threshold (e.g. 97%); detected language ≠ expected |
-| S4 | **Diarize** (pyannote community-1, exclusive mode) → merge speaker labels onto words. **Must be fed an in-memory waveform, never a path — see §2.4** | Speaker-labelled word transcript | You gave an expected speaker count and it differs → stop and ask you to confirm |
+| S3 | **Transcribe + align** (`whispermlx`) | Word-level timestamped transcript, each word carrying an alignment score | **Weakly-aligned words** (interpolated, unaligned, or scoring below the floor) above 5% — see §2.7; detected language ≠ expected |
+| S4 | **Diarize** (pyannote community-1, exclusive mode) — **runs after S5, on candidate windows only** (each span ± 10 s), one pipeline reused across windows. In-memory waveform, never a path (§2.4) | Speaker-labelled words **within each window**; labels do not carry across windows | **Speakers holding ≥5% of the window's speaking time** differ from the expected count → stop and ask you to confirm |
 | S5 | **Rank** (Sonnet) with brief constraints | Candidate list: word-index spans, hook, rationale | Malformed JSON after one retry; fewer than 5 valid candidates after snapping and duration filtering |
-| S6 | **Visual analysis** on candidate windows only: shot boundaries (ffmpeg `scdet`), Apple Vision faces and mouth landmarks at ~5 fps, per-shot IoU tracking | Face tracks per shot | A candidate with no face track at all → that candidate gets letterbox layout only |
+| S6 | **Visual analysis** on candidate windows only: shot boundaries (ffmpeg `scdet`), Apple Vision faces and mouth landmarks at ~5 fps, per-shot IoU tracking. **First stage needing pixels, so the first that waits for the video stream.** | Face tracks per shot | Video stream did not finish downloading; a candidate with no face track at all → that candidate gets letterbox layout only |
 | S7 | **Speaker attribution + layout planning** | Per-clip crop plans: follow-crop, split-screen | Attribution confidence below threshold on more than X% of clip duration → **follow-crop blocked for that clip** (split or letterbox only) |
 | S8 | **Proxy render**: 540×960, `h264_videotoolbox`, captions burned, all available layouts | Preview files | — |
 | S9 | **Review** (you) | Approved clips: in/out, layout, hook text, commentary choice | Human gate by definition |
@@ -139,13 +141,41 @@ Each stage checkpoints its output and is cached by content hash (source hash + s
 
 ### 2.2 Orderings that are load-bearing
 
-1. **S2–S4 start the moment a source lands, in parallel with S1.** Transcription does not depend on the brief. You confirm the brief while the Mac transcribes. S5 waits for both. Speed to campaign is the point, and this removes brief-reading from the critical path. [I]
+1. **S2–S3 start the moment the *audio* lands, in parallel with S1. S4 runs after S5.** [V, revised after step 2]
 
-2. **Ranking (S5) runs before visual analysis (S6), and S6 runs only on candidate windows.** This is the main "light" decision:
-   - Face detection and landmarks on a full 2-hour source at 5 fps is about 36,000 frames.
-   - On 15 candidates × ~60 s it is about 4,500 frames.
+   Two changes, both forced by measurement.
 
-   The cost is that ranking cannot use visual cues such as reactions or laughter on camera. For podcast material, the transcript carries most of the signal, so this is accepted. [I]
+   **Audio arrives before video.** S0 downloads the two streams separately and
+   never muxes them: audio is small and lands first, S2 starts on it
+   immediately, and the video downloads concurrently for S6. Waiting for a
+   merged file would block transcription behind a gigabyte of pixels that
+   nothing before S6 reads. S12 takes the two as separate ffmpeg inputs, which
+   costs nothing — it is already a `filter_complex` pass over both.
+
+   **Diarization moved behind ranking.** It was S2→S4 in parallel with S1, with
+   S5 waiting on both. Step 2 measured full-source diarization at **9 m 04 s
+   for a 2-hour source — 54% of the whole S2–S4 budget** (§2.6), to label audio
+   that ranking mostly discards. It now runs only on the candidate windows S5
+   selects, each padded by 10 s, which is ~15 minutes of audio instead of 118.
+
+   **The cost, stated plainly: S5 ranks an *unlabelled* transcript.** §5.1's
+   input is no longer speaker-labelled, so the ranker cannot see who said what
+   and loses "who delivered the punchline" as a signal. §8 anticipated exactly
+   this trade and judged it acceptable; step 4 should check that judgement
+   against real candidates, which is what the `--full-diarization` flag exists
+   for — it keeps whole-source diarization available for that comparison, and
+   for anything needing speaker identity across the source.
+
+   **Second cost: labels are per-window only.** pyannote numbers speakers
+   independently per call, so `SPEAKER_00` in one window is not `SPEAKER_00` in
+   another. Within a clip that is all S7 needs, since it maps labels to faces
+   inside that clip. Nothing may assume cross-window identity.
+
+2. **Ranking (S5) runs before the expensive per-window analysis — now both S4 and S6.** The original "light" decision, which step 2 extended to diarization:
+   - Face detection and landmarks on a full 2-hour source at 5 fps is about 36,000 frames. On 15 candidates × ~60 s it is about 4,500 frames.
+   - Diarization on a full 2-hour source is 9 m 04 s measured. On the same candidate windows it is roughly 1.2 min at the measured 13× realtime.
+
+   The cost is that ranking sees neither visual cues nor speaker labels. For podcast material the transcript carries most of the signal, so this is accepted — but it is now a larger bet than when only vision was deferred, and step 4 should test it. [V for the timings, I for the judgement]
 
 3. **The LLM returns word indices, not timestamps.** Boundaries are then snapped to sentence starts and ends using punctuation in the transcript. This makes mid-word cuts impossible and removes the risk of hallucinated timestamps. Timestamps are looked up from the alignment data, never generated. [I]
 
@@ -322,9 +352,26 @@ nominal label, because the frame is shorter. Check with `maclips probe <url>`,
 which prints each resolution with its aspect and the crop width it would give,
 before committing bandwidth.
 
-**Caching.** The YouTube video id is the key and names the file, so re-ingesting
-the same URL is a cache hit and no bytes are fetched. Title, channel, duration,
-upload date and the origin URL go into the source record.
+**Split streams, never muxed [V].** Audio and video are downloaded as two
+separate files: `<id>.audio.<ext>` and `<id>.video.<ext>`. Audio is fetched
+first and an `on_audio_ready` callback fires the moment it lands, so S2 starts
+on it while the video is still arriving on a background thread. Merging them
+would block transcription behind a gigabyte of pixels that nothing before S6
+reads.
+
+Measured on the benchmark source: **time to S2 start fell from ~4 m 40 s
+(merged download) to 26.3 s** — the audio stream is 109 MiB against 1,150 MiB
+merged. S12 takes the two as separate ffmpeg inputs, which costs nothing
+because it is already a `filter_complex` pass over both.
+
+`await_video()` blocks until the video lands and is called only by S6, the
+first stage that needs pixels. S2-S5 must never call it.
+
+**Caching.** The YouTube video id is the key and names both files, so
+re-ingesting the same URL is a cache hit and no bytes are fetched. **Both**
+streams must be present to count as a hit — audio alone would let S6 start on a
+video that never arrived. Title, channel, duration, upload date and the origin
+URL go into the source record.
 
 **Gate.** A download failure stops the run and the message suggests
 `uv lock --upgrade-package yt-dlp` — YouTube breakage is almost always a stale
@@ -376,19 +423,35 @@ rate (12.6x) matches the full run's (13.0x), so the cost scales linearly and
 there is no surprise at length.
 
 **Transcript quality [V].** 278 segments, language auto-detected as `en`,
-**19,624 words at 100.00% alignment coverage**. Worth treating with suspicion
-rather than satisfaction: whispermlx interpolates across a sentence before
-giving up on a word, so perfect coverage may mean the 97% gate cannot
-discriminate on clean audio. It will earn its keep on poor audio; do not read
-100% as "alignment is perfect".
+**19,624 words at 100.00% alignment coverage**. Coverage is still the wrong
+gate, but **not for the reason first recorded here** — see the correction in
+§2.7. Measuring the score distribution showed **zero interpolated words** on
+this source; coverage reached 100% because every word aligned, not because
+interpolation papered over failures. What makes coverage useless is different
+and worse: it counts a word whose acoustic score is **0.000** as successfully
+aligned.
 
-**Speaker count: 3 found on a 2-person interview [V].** 2,196 turns, 99.9% of
-words labelled (19,609/19,624). Whether the third label is a real third voice
-(ad read, intro VO, inserted clip) or one speaker split in two is **unresolved
-and needs an ear**. This is precisely what the S4 expected-count gate exists
-for; no count was set for this benchmark, so the gate correctly stayed silent.
-Spot-checks now sample **one excerpt per distinct speaker, rarest first**,
-because three excerpts from the same speaker cannot answer this question.
+**Speaker count: 3 raw labels, 2 real speakers [V] — resolved in step 2b.**
+Measuring each label's share of speaking time settles it:
+
+| label | words | share | seconds |
+|---|---|---|---|
+| `SPEAKER_02` | 13,680 | **66.56%** | 3,711 |
+| `SPEAKER_00` | 5,786 | **32.51%** | 1,812 |
+| `SPEAKER_01` | 144 | 0.92% | 52 |
+
+The two substantial labels are the guest and the host. `SPEAKER_01` is 52
+seconds of short interjections ("No,", "my own eyes? Probably quite a bit.") —
+ordinary over-segmentation of backchannels, not a third person.
+
+**This is why the count gate compares speaking-time share, not raw labels.** At
+a 5% floor the source resolves to exactly 2 speakers, matching the interview.
+Gating on `len(speakers)` would have failed a correct diarization.
+
+An earlier note here suspected `SPEAKER_02` of being the spurious label. That
+was wrong: it is the dominant voice. The suspicion came from positional
+spot-sampling, which surfaced it late in the file; per-speaker sampling with
+word counts shows it immediately.
 
 **Model weights, cached locally [V].** All inference is on-device; Hugging Face
 is only a registry. Whisper large-v3-turbo 1,539 MB and pyannote community-1 +
@@ -407,6 +470,118 @@ then died inside `Pipeline.from_pretrained` with a 403 on `config.yaml`. So
 `check_access()` fetches that file — the one pyannote loads first — and the
 benchmark runs the check as a pre-flight **before** S0. A missing authorization
 now costs a second instead of eight minutes.
+
+### 2.6b Step 2b measurements: the restructure worked [V]
+
+Same source (1h57m46s, 7,066 s), cold S0 cache, warm models, one session.
+**No swap growth in any stage.**
+
+| stage | step 2 | step 2b | change |
+|---|---|---|---|
+| time to S2 start | ~4 m 40 s (merged download) | **26.3 s** (audio only) | **10.6x faster** |
+| S2 extract | 6.5 s | 6.8 s | — |
+| S3 transcribe | 335.5 s | 320.4 s | — |
+| S3 align | 123.5 s | 121.1 s | — |
+| S4 diarize | 543.7 s (whole source) | **61.5 s** (12 windows) | **8.8x faster** |
+| **S2-S4 total** | **16 m 49 s** | **8 m 30 s** | **under the 10-minute target** |
+
+**Time to candidates, which is what the operator actually waits for: ~8.2-8.9
+minutes** from a cold start, including the download. (S5 is still a stub; the
+20-60 s ranking allowance is an assumption -- a single Sonnet call over ~30k
+tokens -- not a measurement.)
+
+**The concurrent video download is entirely hidden. [V]** The video wait
+measured **0.0 s**: all 1,040 MiB of video had already arrived while S2 and S3
+were running. The split costs nothing and buys the 26-second start.
+
+**Window diarization covers 13.4% of the source** -- 12 windows of 60 s plus 10 s
+padding each side is 950 s against 7,066 s -- which is where the 8.8x comes
+from. The measured 114.9x realtime on windows is *better* than the 13.0x on the
+whole source, because per-window audio is short enough to avoid the clustering
+cost that dominates a two-hour pass.
+
+**Windows legitimately contain one speaker, and this is why an exact speaker
+count must never be forced. [V]** Of the first four windows measured:
+
+| window | span | significant speakers | shares |
+|---|---|---|---|
+| 0 | 0-60 s | 2 | `SPEAKER_00` 40%, `SPEAKER_01` 60% |
+| 1 | 584-644 s | **1** | `SPEAKER_00` 100% |
+| 2 | 1168-1228 s | **1** | `SPEAKER_00` 100% |
+| 3 | 1751-1811 s | 2 | `SPEAKER_00` 74%, `SPEAKER_01` 26% |
+
+A 60-second stretch of one person talking is completely ordinary in an
+interview. Passing an exact count of 2 would force pyannote to split that
+single voice in two and invent a second speaker. The expected count is
+therefore passed as `max_speakers` -- a ceiling -- and `num_speakers` is not an
+accepted argument anywhere in the code.
+
+**Alignment quality against the chosen gate:** 19,621 words, **3.59% weak** at
+`min_score = 0.10`, against a 12% ceiling (§2.7). Coverage still reads 100.00%.
+
+### 2.7 The S3 alignment gate, set from data [V]
+
+**Correction to §2.6.** The 100.00% coverage figure was first explained here as
+interpolation filling the gaps. Measuring the distribution disproved that:
+**0 of 19,625 words were interpolated**, and 0 were unaligned. Every word
+aligned acoustically. The mechanism described was real — whispermlx sets
+`start`/`end`/`score` only for characters it can align, then interpolates
+missing `start`/`end` across the sentence **without ever backfilling `score`**,
+so a word with timings but no score has guessed timings — it simply did not
+occur on this source.
+
+**What actually makes coverage useless** is that it treats any word carrying
+timings as aligned, including words whose acoustic confidence is **0.000**.
+On the benchmark source:
+
+| percentile | score |
+|---|---|
+| p0 (minimum) | **0.000** |
+| p1 | 0.001 |
+| p5 | 0.200 |
+| p10 | 0.419 |
+| p25 | 0.708 |
+| p50 (median) | 0.828 |
+| p90 | 0.958 |
+| mean | 0.755 |
+
+Coverage reports 100% across all of it. The bottom 1% of words are acoustically
+unmatched, and coverage cannot see them.
+
+**Weak-word fraction at candidate thresholds** (weak = interpolated, unaligned,
+or scoring below the threshold):
+
+| `min_score` | weak fraction |
+|---|---|
+| 0.05 | 2.90% |
+| **0.10** | **3.59%** |
+| 0.20 | 5.00% |
+| 0.30 | 6.83% |
+| 0.50 | 12.70% |
+
+**Chosen: `min_score = 0.10`, `max_weak_word_fraction = 0.12`.**
+
+The clean source sits at 3.59%, giving ~3.3x headroom. The looseness is
+deliberate. A tighter pairing — say 0.30 and 5% — would *fail this correct
+transcript* at 6.83%, and a gate that stops good audio is worse than no gate.
+This one exists to catch alignment **collapse**: wrong language, a music bed,
+the wrong audio track, where the weak fraction runs to tens of percent.
+
+**A caveat that shapes the threshold [V].** Low scores are strongly biased by
+word length, because `score` is a *per-character mean*. Of the 704 words below
+0.10, the length distribution is 150 one-character, 211 two-character, 183
+three-character — mean **2.7 characters against 4.2 overall** — and they are
+overwhelmingly unstressed function words ("I", "a", "as", "is", "and", "it").
+A one-character word's score is a single character's confidence, which is
+inherently noisy. So the low-score tail measures English function-word density
+as much as alignment quality, and a threshold tight enough to "clean it up"
+would mostly be penalising natural speech.
+
+This matters less than it sounds for clip quality: §2.2 item 3 snaps boundaries
+to **sentence** starts and ends, so a poorly-scored "I" mid-sentence never
+becomes a cut point. If a future source shows weak words clustering at sentence
+boundaries specifically, that is the signal worth gating on, and it would need
+a different measure than this one.
 
 ---
 
@@ -594,7 +769,7 @@ If the heuristic misses the threshold on two-shot sources:
 
 ### 5.1 Input
 
-- The full speaker-labelled transcript, one line per sentence, prefixed with the first word index and the speaker label.
+- The full transcript, one line per sentence, prefixed with the first word index. **Not speaker-labelled**: diarization moved behind ranking in step 2b (§2.2 item 1), so speaker labels do not exist yet at S5. Use `--full-diarization` to produce a labelled transcript for the step-4 comparison.
 - A 2-hour podcast is roughly 25–35k tokens [I], so it fits in one call. No chunking, and no loss of cross-section context.
 
 ### 5.2 Model and cost
@@ -824,7 +999,8 @@ Each step has a "done when". Arrows show what it blocks.
 | Step | Work | Done when | Blocks |
 |---|---|---|---|
 | 1 | **Fork and strip.** Delete the MuAPI path, faster-whisper, Haar, and OpenCV writer. Wire in your orchestrator (stages, cache, gates). Keep the MIT notice. | Stub pipeline runs end to end on one file with dummy stages. | Everything |
-| 2 | **S2–S4.** Integrate `whispermlx` (a PyPI package, not an existing stage of yours — see §3); add pyannote community-1 (accept the HF gate, cache weights for offline use); merge speakers onto words. **Respect the §2.4 version window:** `torch==2.8.0` + `torchcodec==0.7.0`, and feed diarization an in-memory 16 kHz waveform from the S2 WAV, never a path. **First check whether whispermlx's diarization wrapper passes a path to pyannote; if it does, call pyannote directly.** **Benchmark on the M4 Pro:** wall time for a 2-hour source, split into transcription and diarization. | Speaker-labelled transcript for three real podcasts; timings recorded; `import torchcodec` verified to load. | 4 |
+| 2 | **S2–S4.** Integrate `whispermlx` (a PyPI package, not an existing stage of yours — see §3); add pyannote community-1 (accept the HF gate, cache weights for offline use); merge speakers onto words. **Respect the §2.4 version window:** `torch==2.8.0` + `torchcodec==0.7.0`, and feed diarization an in-memory 16 kHz waveform from the S2 WAV, never a path. **First check whether whispermlx's diarization wrapper passes a path to pyannote; if it does, call pyannote directly.** **Benchmark on the M4 Pro:** wall time for a 2-hour source, split into transcription and diarization. | Speaker-labelled transcript for three real podcasts; timings recorded; `import torchcodec` verified to load. **Done for one source (§2.6); restructured in step 2b (§2.5, §2.7) after the first benchmark missed the target.** | 4 |
+| 2b | **Restructure from the step-2 measurements.** Split-stream ingest (audio first, video concurrent); S4 moved after S5 and made window-only; speaker-count gate switched to share-of-speaking-time; S3 gate switched from coverage to weakly-aligned fraction. | Time-to-S2-start, S2–S3 wall and window diarization measured (§2.6); thresholds set from the source's own distribution (§2.7). | 4 |
 | 3 | **S1 brief.** Schema, Haiku extraction, confirm form. Runs in parallel with step 2. | Five real Whop briefs pasted, extracted, and corrected; extraction errors noted. | 4 |
 | 4 | **S5 ranking.** Prompt, schema, snapping, filters. | Candidates for three sources. You judge at least half as worth reviewing. | 5 |
 | 5 | **Minimal Review + render.** Ingest and Review tabs; centre-crop and letterbox layouts; ASS word-highlight captions; hook overlay; one-pass final render; export bundle; Posted tab. | **You can run a real campaign end to end.** Start doing campaigns here. | 6, 8 |
@@ -868,8 +1044,7 @@ Each step has a "done when". Arrows show what it blocks.
 
 1. **Attribution accuracy on real podcasts.** Boom mics covering mouths and strong profile angles are the likely failures. The mitigations are structural: split-screen always exists, the confidence gate routes weak clips to it, and step 7 measures before follow-crop ships.
 
-2. **Diarization speed on Apple Silicon — measured, and it is the bottleneck. [V]** pyannote community-1 on MPS runs at **13x realtime: 9 m 04 s for a 2-hour source** (§2.6). That is 54% of the S2-S4 budget and pushes the total to 16 m 49 s against a 10-minute target. The risk landed. CPU is not an alternative (0.8x realtime, ~15x slower than MPS). The mitigation is the candidate-window-only fallback in §8, which the arithmetic says would bring S2-S4 to roughly 9 minutes — **not implemented; awaiting a decision**.
-
+2. **Diarization speed on Apple Silicon — measured, then designed around. Closed. [V]** pyannote community-1 on MPS runs at **13x realtime: 9 m 04 s for a whole 2-hour source** (§2.6), which was 54% of the S2-S4 budget and pushed the total to 16 m 49 s against a 10-minute target. The risk landed exactly as written. The §8 mitigation was then implemented in step 2b: diarization runs **only on the candidate windows S5 selects**, 13.4% of the audio, measured at **61.5 s** — and S2-S4 now completes in **8 m 30 s**, inside the target (§2.6b). CPU was never an option (0.8x realtime, ~15x slower than MPS). The residual cost is not speed but quality: **S5 now ranks an unlabelled transcript** (§2.2 item 1), and whether that hurts candidate selection is an open question for step 4, testable with `--full-diarization`.
 3. **Sameness with other clippers.** Same source, similar tooling, same "best" moments. Duplicate-flagging is reported by a vendor, not verified [U]. Mitigation: whole-source candidate coverage and deliberate differentiation in framing and hooks (§5.6).
 
 **Softest load-bearing claims**, and what settles each:

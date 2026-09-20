@@ -26,13 +26,42 @@ CLIP_CLASSES = ("campaign", "general-own")
 REJECTED_BRIEF_CATEGORIES = ("crypto", "gambling")
 
 MIN_SOURCE_DURATION_S = 120.0
-MIN_ALIGNED_WORD_COVERAGE = 0.97
+MIN_ALIGNMENT_SCORE = 0.10
+"""Mean per-character alignment confidence below which a word's timing is not
+trusted. Taken from the benchmark source's distribution, not invented: on
+19,625 words of clean two-person audio, 3.59% score below 0.10 and 5.00% below
+0.20 (§2.7). Words under 0.10 are overwhelmingly one- and two-character
+function words, where a per-character mean is inherently noisy."""
+
+MAX_WEAK_WORD_FRACTION = 0.12
+"""Stop if more than this fraction of words are interpolated, unaligned, or
+score below MIN_ALIGNMENT_SCORE.
+
+Set at roughly 3x the clean-source rate (3.59%), deliberately loose. This gate
+exists to catch alignment *collapse* — wrong language, a music bed, the wrong
+audio track — where the weak fraction runs to tens of percent. A tight
+threshold would instead fire on ordinary variation in how many short function
+words a speaker uses, which is not a defect.
+
+It replaces a 97% *coverage* gate that could not discriminate: coverage counts
+a word with an alignment score of 0.000 as successfully aligned (§2.7)."""
 MIN_SURVIVING_CANDIDATES = 5
 FINAL_DURATION_TOLERANCE_S = 0.1
 
 
 def _cfg(ctx: RunContext, key: str, default: Any = None) -> Any:
     return ctx.config.get(key, default)
+
+
+def _waveform(ctx: RunContext):
+    """The one decoded copy of the audio, loaded on first use and shared."""
+    waveform = ctx.shared.get("waveform")
+    if waveform is None:
+        from .audio import load_wav
+
+        waveform = load_wav(Path(ctx.output("S2")["audio_path"]))
+        ctx.shared["waveform"] = waveform
+    return waveform
 
 
 # --------------------------------------------------------------------------- #
@@ -112,12 +141,7 @@ def s3_transcribe(ctx: RunContext) -> StageOutput:
     """Transcribe and align with whispermlx (MLX backend)."""
     from . import transcribe as s3
 
-    waveform = ctx.shared.get("waveform")
-    if waveform is None:
-        from .audio import load_wav
-
-        waveform = load_wav(Path(ctx.output("S2")["audio_path"]))
-        ctx.shared["waveform"] = waveform
+    waveform = _waveform(ctx)
 
     # Transcription always auto-detects. Forcing Whisper to `expected_language`
     # would make the gate below tautological: the detected language could never
@@ -130,17 +154,25 @@ def s3_transcribe(ctx: RunContext) -> StageOutput:
         on_stage=ctx.shared.get("on_substage"),
     )
     ctx.shared["transcript"] = result
+    min_score = float(_cfg(ctx, "min_alignment_score", MIN_ALIGNMENT_SCORE))
+    max_weak = float(_cfg(ctx, "max_weak_word_fraction", MAX_WEAK_WORD_FRACTION))
+    weak = result.weak_fraction(min_score)
+    stats = result.score_stats()
     out = {
         "words": [w.as_dict() for w in result.words],
-        "aligned_coverage": result.coverage,
+        "aligned_coverage": result.coverage,   # reported, not gated
+        "weak_fraction": weak,
+        "score_stats": stats,
         "language": result.language,
         "word_count": len(result.words),
     }
-    if out["aligned_coverage"] < MIN_ALIGNED_WORD_COVERAGE:
+    if weak > max_weak:
         raise GateFailure(
             "S3",
-            f"aligned-word coverage {out['aligned_coverage']:.1%} is below "
-            f"{MIN_ALIGNED_WORD_COVERAGE:.0%}.",
+            f"{weak:.1%} of words are weakly aligned (interpolated, unaligned, or "
+            f"scoring below {min_score}), above the {max_weak:.0%} ceiling. "
+            f"{stats['interpolated']} interpolated, {stats['unaligned']} unaligned "
+            f"of {stats['words']}.",
         )
     expected = _cfg(ctx, "expected_language")
     if expected and out["language"] != expected:
@@ -152,7 +184,14 @@ def s3_transcribe(ctx: RunContext) -> StageOutput:
 
 
 def s4_diarize(ctx: RunContext) -> StageOutput:
-    """pyannote community-1, exclusive mode; merge speaker labels onto words."""
+    """Diarize the candidate windows only (pyannote community-1, exclusive mode).
+
+    Runs **after** S5, not before it: build step 2 measured full-source
+    diarization at 9m04s for a 2-hour source — 54% of the S2-S4 budget — while
+    the candidates it actually informs cover ~15 minutes of that audio (§2.6).
+
+    The cost is that S5 ranks an unlabelled transcript (§2.2 item 1).
+    """
     from . import diarize as s4
 
     try:
@@ -160,32 +199,70 @@ def s4_diarize(ctx: RunContext) -> StageOutput:
     except s4.DiarizationAccessError as exc:
         raise GateFailure("S4", str(exc)) from exc
 
-    waveform = ctx.shared.get("waveform")
-    if waveform is None:
-        from .audio import load_wav
-
-        waveform = load_wav(Path(ctx.output("S2")["audio_path"]))
-        ctx.shared["waveform"] = waveform
-
-    result = s4.diarize(
-        waveform,
-        num_speakers=_cfg(ctx, "expected_speaker_count"),
-        min_speakers=_cfg(ctx, "min_speakers"),
-        max_speakers=_cfg(ctx, "max_speakers"),
-    )
+    waveform = _waveform(ctx)
     transcript = ctx.shared.get("transcript")
-    if transcript is not None:
-        s4.assign_speakers(transcript.words, result)
-        ctx.shared["samples"] = s4.sample_labels(transcript.words)
-    out = {"speakers": len(result.speakers), **result.as_dict()}
     expected = _cfg(ctx, "expected_speaker_count")
-    if expected is not None and out["speakers"] != expected:
+
+    if _cfg(ctx, "full_diarization", False):
+        # Whole-source pass. Kept for the step-4 ranking comparison and for
+        # anything needing speaker identity across the source; never the default.
+        result = s4.diarize(waveform, max_speakers=expected)
+        if transcript is not None:
+            s4.assign_speakers(transcript.words, result)
+            ctx.shared["samples"] = s4.sample_labels(transcript.words)
+        _gate_speaker_count(result, expected, "whole source")
+        return {"mode": "full", "speakers": len(result.speakers), **result.as_dict()}
+
+    spans = _candidate_spans(ctx)
+    if not spans:
+        raise GateFailure("S4", "no candidate spans from S5 to diarize.")
+
+    windows = s4.diarize_windows(waveform, spans, max_speakers=expected)
+    ctx.shared["windows"] = windows
+
+    if transcript is not None:
+        for window in windows:
+            in_window = [
+                w for w in transcript.words
+                if w.aligned and window.start <= w.start < window.end
+            ]
+            s4.assign_speakers(in_window, window.result)
+
+    for window in windows:
+        _gate_speaker_count(window.result, expected, f"window {window.index}")
+
+    counts = [len(w.result.significant_speakers()) for w in windows]
+    return {
+        "mode": "windows",
+        "window_count": len(windows),
+        "speakers_per_window": counts,
+        "speakers": max(counts) if counts else 0,
+        "windows": [w.as_dict() for w in windows],
+    }
+
+
+def _gate_speaker_count(result: Any, expected: int | None, where: str) -> None:
+    """Compare significant speakers, not raw labels, against the expected count."""
+    if expected is None:
+        return
+    significant = result.significant_speakers()
+    if len(significant) != expected:
+        shares = ", ".join(f"{s} {v:.0%}" for s, v in sorted(result.shares().items()))
         raise GateFailure(
             "S4",
-            f"found {out['speakers']} speakers, you expected {expected}. "
+            f"{where}: found {len(significant)} speakers holding >=5% of speaking "
+            f"time, you expected {expected}. Shares: {shares or 'none'}. "
             "Confirm the count before continuing.",
         )
-    return out
+
+
+def _candidate_spans(ctx: RunContext) -> list[tuple[float, float]]:
+    """Candidate time spans from S5, as (start, end) seconds."""
+    spans: list[tuple[float, float]] = []
+    for c in ctx.output("S5").get("candidates", []) or []:
+        if isinstance(c, dict) and c.get("start") is not None and c.get("end") is not None:
+            spans.append((float(c["start"]), float(c["end"])))
+    return spans
 
 
 # --------------------------------------------------------------------------- #
@@ -216,7 +293,21 @@ def s5_rank(ctx: RunContext) -> StageOutput:
 # --------------------------------------------------------------------------- #
 
 def s6_visual_analysis(ctx: RunContext) -> StageOutput:
-    """scdet shots + Apple Vision faces/landmarks at ~5 fps, candidate windows only."""
+    """scdet shots + Apple Vision faces/landmarks at ~5 fps, candidate windows only.
+
+    First point in the pipeline that needs pixels, and therefore the first that
+    must wait for the video stream. S0 downloads audio and video separately so
+    S2-S5 never block on video bytes (§2.5).
+    """
+    record = ctx.shared.get("source_record")
+    if record is not None and not record.video_ready:
+        from .ingest import IngestError, await_video
+
+        try:
+            await_video(record, timeout=float(_cfg(ctx, "video_wait_s", 1800.0)))
+        except IngestError as exc:
+            raise GateFailure("S6", f"video stream unavailable: {exc}") from exc
+
     # STUB: build step 6. A candidate with no face track is not a run-stopper;
     # it is restricted to letterbox, per §2.1.
     return {"tracks": {}, "shots": [], "letterbox_only": [], **STUB}
@@ -320,17 +411,21 @@ STAGES: tuple[StageSpec, ...] = (
     StageSpec("S2", "audio-extract", "ffmpeg to 16 kHz mono WAV", s2_audio_extract,
               needs=("S0",), gate=""),
     StageSpec("S3", "transcribe", "whispermlx transcript + alignment", s3_transcribe,
-              needs=("S2",), params=("expected_language", "whisper_model"),
-              gate="Aligned-word coverage below 97%; language != expected"),
-    StageSpec("S4", "diarize", "pyannote community-1 + word merge", s4_diarize,
-              needs=("S3",), params=("expected_speaker_count", "min_speakers", "max_speakers"),
-              gate="Speaker count differs from the count you gave"),
+              needs=("S2",),
+              params=("expected_language", "whisper_model", "min_alignment_score",
+                      "max_weak_word_fraction"),
+              gate="Weakly-aligned words above 5%; language != expected"),
+    # S5 before S4: diarization is window-only and needs the candidate spans.
     StageSpec("S5", "rank", "Sonnet ranks candidates", s5_rank,
-              needs=("S1", "S4"), params=("stub_candidates", "stub_malformed_json"),
+              needs=("S1", "S3"), params=("stub_candidates", "stub_malformed_json"),
               gate="Malformed JSON after one retry; fewer than 5 candidates survive"),
-    StageSpec("S6", "visual-analysis", "scdet shots + Vision face tracks", s6_visual_analysis,
+    StageSpec("S4", "diarize", "pyannote community-1 on candidate windows", s4_diarize,
               needs=("S5",),
-              gate="Candidate with no face track is restricted to letterbox"),
+              params=("expected_speaker_count", "full_diarization"),
+              gate="Speakers holding >=5% of speaking time differ from the expected count"),
+    StageSpec("S6", "visual-analysis", "scdet shots + Vision face tracks", s6_visual_analysis,
+              needs=("S4",),
+              gate="Both streams must have downloaded; candidate with no face track is letterbox-only"),
     StageSpec("S7", "attribution", "Speaker attribution + layout plans", s7_attribution,
               needs=("S6",),
               gate="Low attribution confidence blocks follow-crop for that clip"),

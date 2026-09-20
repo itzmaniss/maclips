@@ -27,6 +27,17 @@ from .transcribe import Word
 COMMUNITY_MODEL = "pyannote/speaker-diarization-community-1"
 DEVICE = "mps"
 
+WINDOW_PAD_S = 10.0
+"""Context either side of a candidate span. Diarization needs a little audio to
+separate voices; a bare 60-second cut starting mid-sentence gives it less to
+work with, and the padding is discarded after labelling."""
+
+MIN_SPEAKING_SHARE = 0.05
+"""A label holding under 5% of a window's speaking time is not treated as a
+speaker for gating. Diarization routinely emits a sliver label for a
+backchannel or a breath, and counting raw labels would fail the gate on a
+clean two-person window."""
+
 
 class DiarizationAccessError(RuntimeError):
     """The gated model is not reachable with the cached credentials."""
@@ -44,10 +55,36 @@ class DiarizationResult:
     turns: list[Turn] = field(default_factory=list)
     speakers: list[str] = field(default_factory=list)
 
+    def speaking_time(self) -> dict[str, float]:
+        """Seconds of speech per label."""
+        totals: dict[str, float] = {}
+        for turn in self.turns:
+            totals[turn.speaker] = totals.get(turn.speaker, 0.0) + (turn.end - turn.start)
+        return totals
+
+    def significant_speakers(self, min_share: float = MIN_SPEAKING_SHARE) -> list[str]:
+        """Labels holding at least `min_share` of total speaking time.
+
+        This, not `len(speakers)`, is what the count gate compares against:
+        raw label count treats a half-second sliver as a person.
+        """
+        totals = self.speaking_time()
+        total = sum(totals.values())
+        if total <= 0:
+            return []
+        return sorted(s for s, secs in totals.items() if secs / total >= min_share)
+
+    def shares(self) -> dict[str, float]:
+        totals = self.speaking_time()
+        total = sum(totals.values()) or 1.0
+        return {s: secs / total for s, secs in totals.items()}
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "speakers": self.speakers,
             "speaker_count": len(self.speakers),
+            "significant_speakers": self.significant_speakers(),
+            "shares": {s: round(v, 4) for s, v in self.shares().items()},
             "turn_count": len(self.turns),
             "turns": [{"start": t.start, "end": t.end, "speaker": t.speaker} for t in self.turns],
         }
@@ -105,34 +142,113 @@ def check_access(model: str = COMMUNITY_MODEL) -> str:
         return ""
 
 
-def diarize(
-    waveform: np.ndarray,
-    num_speakers: int | None = None,
-    min_speakers: int | None = None,
-    max_speakers: int | None = None,
-    device: str = DEVICE,
-    model: str = COMMUNITY_MODEL,
-) -> DiarizationResult:
-    """Run diarization on an in-memory waveform. Never takes a path."""
+def load_pipeline(device: str = DEVICE, model: str = COMMUNITY_MODEL):
+    """Load the diarization pipeline once, for reuse across many windows.
+
+    Loading costs seconds and several GB; doing it per window would dominate
+    the cost of window-only diarization and defeat the point of the change.
+    """
     from whispermlx.diarize import DiarizationPipeline
 
-    pipeline = DiarizationPipeline(model_name=model, token=None, device=device)
+    return DiarizationPipeline(model_name=model, token=None, device=device)
+
+
+def _run_pipeline(
+    pipeline,
+    waveform: np.ndarray,
+    max_speakers: int | None,
+    min_speakers: int | None,
+    offset: float = 0.0,
+) -> DiarizationResult:
+    """One pipeline call. `offset` shifts turns back onto the source timeline."""
+    frame = pipeline(waveform, min_speakers=min_speakers, max_speakers=max_speakers)
+    turns = [
+        Turn(start=float(r.start) + offset, end=float(r.end) + offset, speaker=str(r.speaker))
+        for r in frame.itertuples()
+    ]
+    return DiarizationResult(turns=turns, speakers=sorted({t.speaker for t in turns}))
+
+
+def diarize(
+    waveform: np.ndarray,
+    max_speakers: int | None = None,
+    min_speakers: int | None = None,
+    device: str = DEVICE,
+    model: str = COMMUNITY_MODEL,
+    pipeline=None,
+) -> DiarizationResult:
+    """Diarize a whole in-memory waveform. Never takes a path.
+
+    **`num_speakers` is deliberately not accepted.** An exact count is wrong
+    for a window, which may legitimately contain one speaker, and forcing a
+    count makes diarization invent a second voice. The expected count is passed
+    as `max_speakers` — a ceiling, not a target.
+    """
+    owned = pipeline is None
+    pipeline = pipeline or load_pipeline(device=device, model=model)
     try:
-        frame = pipeline(
-            waveform,
-            num_speakers=num_speakers,
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
-        )
+        return _run_pipeline(pipeline, waveform, max_speakers, min_speakers)
+    finally:
+        if owned:
+            release(pipeline)
+
+
+@dataclass
+class Window:
+    """One candidate span, diarized independently."""
+
+    index: int
+    start: float
+    end: float
+    result: DiarizationResult
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"index": self.index, "start": self.start, "end": self.end, **self.result.as_dict()}
+
+
+def diarize_windows(
+    waveform: np.ndarray,
+    spans: list[tuple[float, float]],
+    max_speakers: int | None = None,
+    min_speakers: int | None = None,
+    pad_s: float = WINDOW_PAD_S,
+    sample_rate: int = SAMPLE_RATE,
+    device: str = DEVICE,
+    model: str = COMMUNITY_MODEL,
+    on_window: Any = None,
+) -> list[Window]:
+    """Diarize only the candidate spans, each padded by `pad_s` either side.
+
+    **Speaker labels are per-window and carry no identity across windows.**
+    pyannote assigns `SPEAKER_00`, `SPEAKER_01` ... independently per call, so
+    `SPEAKER_00` in window 3 is not the person who was `SPEAKER_00` in window
+    1. Within a clip that is all S7 needs — it maps labels to faces inside that
+    clip. Anything wanting "the same person across the source" must use
+    full-source diarization instead (`--full-diarization`).
+
+    The pipeline is loaded once and reused for every window.
+    """
+    if not spans:
+        return []
+
+    pipeline = load_pipeline(device=device, model=model)
+    windows: list[Window] = []
+    try:
+        duration = len(waveform) / sample_rate
+        for i, (start, end) in enumerate(spans):
+            lo = max(0.0, start - pad_s)
+            hi = min(duration, end + pad_s)
+            chunk = waveform[int(lo * sample_rate) : int(hi * sample_rate)]
+            if len(chunk) < sample_rate:  # under a second is not diarizable
+                windows.append(Window(i, start, end, DiarizationResult()))
+                continue
+            result = _run_pipeline(pipeline, chunk, max_speakers, min_speakers, offset=lo)
+            windows.append(Window(i, start, end, result))
+            if on_window is not None:
+                on_window(i, len(spans), result)
     finally:
         release(pipeline)
-
-    turns = [
-        Turn(start=float(row.start), end=float(row.end), speaker=str(row.speaker))
-        for row in frame.itertuples()
-    ]
-    speakers = sorted({t.speaker for t in turns})
-    return DiarizationResult(turns=turns, speakers=speakers)
+    return windows
 
 
 def assign_speakers(words: list[Word], result: DiarizationResult) -> list[Word]:
