@@ -192,6 +192,25 @@ Each stage checkpoints its output and is cached by content hash (source hash + s
   Harmless here because nothing resolves ffmpeg via PATH, but `brew upgrade
   ffmpeg` or `brew uninstall ffmpeg` keeps the rest of the system working. [V]
 
+  **Do not `brew pin ffmpeg-full`.** Pinning is the obvious reflex here and it
+  does not buy what it looks like it buys. `brew pin` holds the *formula's own*
+  version; it does nothing about its dependencies. x265, libass, freetype and
+  the rest keep upgrading underneath a pinned build, and when a shared
+  library's soname bumps, the pinned binary is left linking a dylib that no
+  longer exists — exactly the failure the unpinned slim `ffmpeg` just hit
+  (`libx265.216` → `.217`). Pinning makes that *more* likely, not less,
+  because the pinned build drifts further from its dependencies over time
+  while an unpinned one gets relinked on upgrade.
+
+  **The guard is the startup gate, not a pin.** The gate executes the
+  configured binary and reads back its real filter and encoder lists, so a
+  broken library link surfaces as a failed `check` with the binary's path in
+  the message — before any stage does work. A pin would give a false sense of
+  stability and still fail at the same point. If a Homebrew upgrade ever does
+  break the build, the gate says so and the fix is `brew reinstall
+  ffmpeg-full` (relink against current dependencies) or pointing
+  `MACLIPS_FFMPEG` at a working build. [I]
+
 ### 2.4 The torch / torchcodec version window (S4) [V]
 
 **This is a one-version window, and it is load-bearing. Verified in build
