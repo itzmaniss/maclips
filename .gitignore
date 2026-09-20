@@ -1,8 +1,46 @@
+# Ruflo local secrets and runtime data
 .env
-__pycache__/
-*.pyc
+.env.local
+.env.*.local
+.claude-flow/data/
+.claude-flow/logs/
+.claude-flow/sessions/
+
+# Codex local configuration
+.codex/
+# Claude Flow runtime data
+# Environment variables
+
+# --- maclips ---
+# Ruflo runtime / vector store (machine-local, not project source)
+.claude-flow/
+.swarm/
+.agents/
+ruvector.db
+ruvector.db-*
+
+# Python / uv
 .venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Pipeline working data (large media + derived artifacts)
+/work/
+/output/
+/models/
+
+# From upstream fork base
 venv/
-output/
 *.mp4
 .DS_Store
+
+# Ruflo-generated Claude tooling (regenerable via `ruflo init`); keep settings only
+.claude/agents/
+.claude/commands/
+.claude/skills/
+.claude/helpers/
+.claude/proven-config.json
+.claude/.proven-config-version
+.claude/settings.local.json

@@ -1,0 +1,38 @@
+[project]
+name = "maclips"
+version = "0.1.0"
+description = "Semi-automated video clipping for a single Apple Silicon Mac"
+readme = "README.md"
+authors = [
+    { name = "Manish", email = "noflix38@gmail.com" }
+]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi==0.141.1",
+    "jinja2==3.1.6",
+    "litellm==1.102.0",
+    "mlx==0.32.2",
+    "pyannote-audio==4.0.7",
+    "pyobjc-framework-vision==12.2.2",
+    "python-dotenv==1.2.3",
+    "torch==2.8.0",
+    "torchcodec==0.7.0",
+    "uvicorn[standard]==0.53.0",
+    "whispermlx==3.13.1",
+    "yt-dlp==2026.8.19",
+]
+
+[project.scripts]
+maclips = "maclips:main"
+
+[build-system]
+requires = ["uv_build>=0.12.2,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
