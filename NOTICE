@@ -1,0 +1,31 @@
+maclips
+=======
+
+This project is a fork of **AI-Youtube-Shorts-Generator**
+(https://github.com/SamurAIGPT/AI-Youtube-Shorts-Generator), MIT licensed,
+Copyright (c) 2026 Anil Chandra Naidu Matcha. The upstream copyright notice is
+retained in LICENSE as the MIT terms require.
+
+What still derives from upstream after the step-1 strip:
+  * src/maclips/highlights.py  — get_highlights() and its llm_fn seam,
+                                 JSON-repair and overlap-dedupe helpers.
+  * src/maclips/ffmpeg.py      — the ffmpeg subclip invocation and the
+                                 aspect-ratio parser.
+  * docs/prompts/ranking-upstream-draft.md
+                               — the ranking prompt, kept verbatim as a draft
+                                 for reference. Not imported by any code.
+
+Third-party model weights and data
+----------------------------------
+
+* **pyannote/speaker-diarization-community-1** — CC-BY-4.0, gated download on
+  Hugging Face. Attribution is required when this pipeline's output is
+  distributed. Not vendored here; fetched at runtime into a local cache.
+
+* **Apple Vision** (`VNDetectFaceRectanglesRequest`,
+  `VNDetectFaceLandmarksRequest`) — macOS system framework, reached through
+  pyobjc. No weights are shipped or redistributed by this project.
+
+* **Light-ASD / TalkNet-ASD weights** — deliberately NOT used. See PLAN.md §4.3
+  for the licence reasoning; the TalkSet-finetuned checkpoints derive from
+  CC BY-NC-ND material and must not enter this pipeline.
