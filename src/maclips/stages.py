@@ -105,17 +105,33 @@ def s1_brief(ctx: RunContext) -> StageOutput:
     if ctx.output("S0")["clip_class"] != "campaign":
         return {"applicable": False}
 
-    # STUB: build step 3 replaces this with Haiku extraction + the confirm form.
+    from .brief import BriefRejected, CampaignConfig
+
     brief = dict(_cfg(ctx, "brief", {}) or {})
-    category = str(brief.get("category", "")).lower()
-    if category in REJECTED_BRIEF_CATEGORIES:
-        raise GateFailure("S1", f"brief category {category!r} is rejected (PLAN.md §7.2).")
-    if not brief.get("confirmed", False):
+    if not brief:
         raise GateFailure(
             "S1",
-            "brief is not confirmed. S5 will not start on an unconfirmed brief.",
+            "no campaign brief. Run `maclips brief <file>` to extract and confirm "
+            "one first; S5 will not start without it.",
         )
-    return {"applicable": True, "brief": brief, **STUB}
+
+    cfg = CampaignConfig.from_dict(brief)
+    try:
+        cfg.check_category()
+    except BriefRejected as exc:
+        raise GateFailure("S1", str(exc)) from exc
+
+    problems = cfg.validate()
+    if problems:
+        raise GateFailure("S1", f"brief is missing required fields: {', '.join(problems)}.")
+
+    if not cfg.confirmed:
+        raise GateFailure(
+            "S1",
+            "brief is not confirmed. S5 will not start on an unconfirmed brief "
+            "(PLAN.md §2.1). Confirm it with `maclips brief --confirm`.",
+        )
+    return {"applicable": True, "brief": cfg.as_dict()}
 
 
 # --------------------------------------------------------------------------- #
@@ -274,18 +290,75 @@ def s5_rank(ctx: RunContext) -> StageOutput:
     if ctx.output("S0")["clip_class"] == "campaign" and not ctx.output("S1").get("brief"):
         raise GateFailure("S5", "no confirmed brief; ranking cannot apply its constraints.")
 
-    # STUB: build step 4 adds the prompt, schema, snapping and filters.
-    candidates = list(_cfg(ctx, "stub_candidates", []) or [])
-    if _cfg(ctx, "stub_malformed_json", False):
-        raise GateFailure("S5", "ranking returned malformed JSON after one retry.")
-    if candidates and len(candidates) < MIN_SURVIVING_CANDIDATES:
+    stub = _cfg(ctx, "stub_candidates")
+    if stub is not None:
+        # Test path: skip the model, exercise the gate on supplied candidates.
+        candidates = list(stub)
+        if _cfg(ctx, "stub_malformed_json", False):
+            raise GateFailure("S5", "ranking returned malformed JSON after one retry.")
+        if candidates and len(candidates) < MIN_SURVIVING_CANDIDATES:
+            raise GateFailure(
+                "S5",
+                f"only {len(candidates)} candidates survived snapping and duration "
+                f"filtering; the floor is {MIN_SURVIVING_CANDIDATES}.",
+            )
+        return {"candidates": candidates, **STUB}
+
+    from . import ranking
+    from .llm import rank_fn
+
+    transcript = ctx.shared.get("transcript")
+    if transcript is None:
+        raise GateFailure("S5", "no transcript from S3 to rank.")
+
+    brief = ctx.output("S1").get("brief") or {}
+    usage: list = []
+
+    def call(prompt: str) -> str:
+        return rank_fn(prompt, usage_sink=usage)
+
+    try:
+        candidates, meta = ranking.rank(
+            transcript.words,
+            llm_fn=call,
+            count=int(_cfg(ctx, "candidate_count", 12)),
+            min_duration_s=float(brief.get("min_duration_s") or ranking.DEFAULT_MIN_DURATION_S),
+            max_duration_s=float(brief.get("max_duration_s") or ranking.DEFAULT_MAX_DURATION_S),
+            brief_block=_brief_block(brief),
+        )
+    except ranking.RankingError as exc:
+        raise GateFailure("S5", str(exc)) from exc
+
+    if meta.get("insufficient"):
         raise GateFailure(
             "S5",
             f"only {len(candidates)} candidates survived snapping and duration "
             f"filtering; the floor is {MIN_SURVIVING_CANDIDATES}. "
-            "That means a bad source or a broken prompt.",
+            f"Dropped: {meta['dropped']}. That means a bad source or a broken prompt.",
         )
-    return {"candidates": candidates, **STUB}
+
+    ctx.shared["candidates"] = candidates
+    return {
+        "candidates": [c.as_dict() for c in candidates],
+        "usage": usage,
+        **{k: v for k, v in meta.items() if k != "insufficient"},
+    }
+
+
+def _brief_block(brief: dict) -> str:
+    """Hard exclusions from the confirmed brief, as prompt text (§5.3, §5.5)."""
+    if not brief:
+        return ""
+    lines = []
+    forbidden = brief.get("forbidden_topics") or []
+    if forbidden:
+        lines.append(f"- **Forbidden topics — exclude entirely:** {', '.join(forbidden)}.")
+    phrases = brief.get("required_phrases") or []
+    if phrases:
+        lines.append(f"- The brand requires these phrases somewhere: {', '.join(phrases)}.")
+    if not lines:
+        return ""
+    return "\nBrief constraints (hard):\n" + "\n".join(lines) + "\n"
 
 
 # --------------------------------------------------------------------------- #
@@ -417,7 +490,8 @@ STAGES: tuple[StageSpec, ...] = (
               gate="Weakly-aligned words above 5%; language != expected"),
     # S5 before S4: diarization is window-only and needs the candidate spans.
     StageSpec("S5", "rank", "Sonnet ranks candidates", s5_rank,
-              needs=("S1", "S3"), params=("stub_candidates", "stub_malformed_json"),
+              needs=("S1", "S3"),
+              params=("stub_candidates", "stub_malformed_json", "candidate_count"),
               gate="Malformed JSON after one retry; fewer than 5 candidates survive"),
     StageSpec("S4", "diarize", "pyannote community-1 on candidate windows", s4_diarize,
               needs=("S5",),

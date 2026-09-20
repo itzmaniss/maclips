@@ -799,6 +799,34 @@ If the heuristic misses the threshold on two-shot sources:
   - brief field extraction, with human confirmation;
   - commentary drafts, with human acceptance.
 
+### 5.2b Implementation status and measured transcript size [V/blocked]
+
+Steps 3 and 4 are **implemented but unexercised against the live models**: no
+`ANTHROPIC_API_KEY` is configured, so every figure below that needs a model
+call is still open. What is measured comes from the cached benchmark
+transcript.
+
+**Transcript size, measured on 19,625 real words (§2.6b's source):**
+
+| form | sentences | characters | rough token estimate |
+|---|---|---|---|
+| unlabelled (what S5 sees) | 2,095 | 118,410 | ~29.6k |
+| speaker-labelled | 2,095 | 143,502 | ~35.9k |
+
+The unlabelled figure lands inside §5.1's 25-35k estimate. Two caveats: the
+estimate is `chars / 4`, not a tokenizer count, and §5.2 warns the current
+tokenizer can use up to ~1.35x more tokens than older assumptions — so treat
+this as an order-of-magnitude check, not a budget. `count_tokens` settles it.
+
+**Speaker labels cost 21.2% more input.** That is a real price on the
+labelled condition, and it counts against restoring pre-ranking diarization
+independently of whether labels improve selection.
+
+**Cost is reported as a range, not a number.** Because the Sonnet 5 rate is
+disputed ($2/$10 vs $3/$15, §5.2), every logged call carries both figures and
+`config.cost_range_usd()` returns a list. At ~30k input and ~4k output that is
+**$0.10 - $0.15 per source**, and it stays a range until an invoice settles it.
+
 ### 5.3 Prompt contract
 
 The prompt returns JSON only, validated against a schema. Per candidate:

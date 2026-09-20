@@ -29,12 +29,20 @@ RANKING_MODEL = os.getenv("MACLIPS_RANKING_MODEL", "anthropic/claude-sonnet-5")
 BRIEF_MODEL = os.getenv("MACLIPS_BRIEF_MODEL", "anthropic/claude-haiku-4-5")
 COMMENTARY_MODEL = os.getenv("MACLIPS_COMMENTARY_MODEL", "anthropic/claude-haiku-4-5")
 
-# Per-million-token rates, for the cost line the UI shows per source.
-# Verified against Anthropic's model table (2026-06-24 snapshot). PLAN.md §5.2
-# quotes $3/$15 for Sonnet, which is Sonnet 4.6's rate, not Sonnet 5's.
+# Per-million-token rates (input, output).
+#
+# **Sonnet 5's rate is disputed** — $2/$10 and $3/$15 are both cited, and
+# whether the introductory pricing became permanent is unsettled (§5.2). Rather
+# than pick a side, both are carried and every cost is reported as a range
+# until a real invoice settles it.
 TOKEN_RATES_USD_PER_MTOK = {
     "anthropic/claude-sonnet-5": (2.00, 10.00),
     "anthropic/claude-haiku-4-5": (1.00, 5.00),
+    "anthropic/claude-haiku-4-5-20251001": (1.00, 5.00),
+}
+
+DISPUTED_RATES_USD_PER_MTOK = {
+    "anthropic/claude-sonnet-5": [(2.00, 10.00), (3.00, 15.00)],
 }
 
 # --------------------------------------------------------------------------- #
@@ -116,6 +124,20 @@ class Secrets:
 
 
 def estimated_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
-    """Dollar cost of one call, for the per-source cost line."""
+    """Dollar cost of one call at the primary rate."""
     rate_in, rate_out = TOKEN_RATES_USD_PER_MTOK.get(model, (0.0, 0.0))
     return (input_tokens * rate_in + output_tokens * rate_out) / 1_000_000
+
+
+def cost_range_usd(model: str, input_tokens: int, output_tokens: int) -> list[float]:
+    """Cost under every rate still in dispute for this model (§5.2).
+
+    Returns one figure per candidate rate, low first. A single number would
+    imply a precision the pricing question does not have.
+    """
+    pairs = DISPUTED_RATES_USD_PER_MTOK.get(model)
+    if not pairs:
+        return [estimated_cost_usd(model, input_tokens, output_tokens)]
+    return sorted(
+        (input_tokens * i + output_tokens * o) / 1_000_000 for i, o in pairs
+    )

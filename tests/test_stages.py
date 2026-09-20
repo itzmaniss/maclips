@@ -137,8 +137,13 @@ def test_s0_gates_on_unreadable_container(tmp_path):
     ("stage_id", "config", "expected"),
     [
         ("S0", {"clip_class": "general-3p"}, "not offered"),
-        ("S1", {"clip_class": "campaign", "brief": {"category": "crypto"}}, "rejected"),
-        ("S1", {"clip_class": "campaign", "brief": {"category": "saas"}}, "not confirmed"),
+        ("S1", {"clip_class": "campaign", "brief": {"brand": "B", "campaign_name": "C",
+                "platforms_allowed": ["tiktok"], "category": "crypto"}}, "rejected"),
+        ("S1", {"clip_class": "campaign", "brief": {"brand": "B", "campaign_name": "C",
+                "platforms_allowed": ["tiktok"], "category": "saas"}}, "not confirmed"),
+        ("S1", {"clip_class": "campaign", "brief": {"category": "saas"}},
+         "missing required fields"),
+        ("S1", {"clip_class": "campaign", "brief": {}}, "no campaign brief"),
         ("S5", {"stub_malformed_json": True}, "malformed JSON"),
         ("S5", {"stub_candidates": [1, 2, 3]}, "the floor is 5"),
         ("S9", {"approvals": []}, "no clips approved"),
@@ -278,7 +283,8 @@ def test_s14_blocks_campaign_clip_without_disclosure(tmp_path, tiny_av):
     ctx = make_ctx(
         tmp_path, tiny_av,
         clip_class="campaign",
-        brief={"category": "saas", "confirmed": True},
+        brief={"brand": "B", "campaign_name": "C", "platforms_allowed": ["tiktok"],
+               "category": "saas", "confirmed": True},
         post_rows=[{"clip_id": "c1", "disclosure_ticked": False}],
     )
     gated = run_pipeline(ctx, STAGES).gated

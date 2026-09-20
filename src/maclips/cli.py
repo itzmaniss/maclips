@@ -33,6 +33,125 @@ def _cmd_check() -> int:
     return 0
 
 
+EDITABLE_HELP = """
+Commands: <field>=<value> to edit, 'list' to redisplay, 'confirm' to save,
+          'quit' to abandon. List fields take comma-separated values.
+"""
+
+
+def _render_brief(cfg) -> None:
+    from dataclasses import fields
+
+    print("\n" + "=" * 70)
+    print(f"{cfg.brand or '(no brand)'} — {cfg.campaign_name or '(no campaign name)'}")
+    print("=" * 70)
+    for f in fields(cfg):
+        if f.name in ("raw_brief", "confirmed", "missing"):
+            continue
+        value = getattr(cfg, f.name)
+        shown = ", ".join(str(v) for v in value) if isinstance(value, list) else value
+        flag = ""
+        if f.name in cfg.missing:
+            flag = "   <- brief did not specify this"
+        elif shown in ("", None, []):
+            flag = "   <- empty"
+        print(f"  {f.name:<22} {str(shown) if shown not in (None, '') else '-':<28}{flag}")
+    problems = cfg.validate()
+    if problems:
+        print(f"\n  REQUIRED FIELDS STILL MISSING: {', '.join(problems)}")
+
+
+def _apply_edit(cfg, line: str) -> str:
+    from dataclasses import fields
+
+    if "=" not in line:
+        return "expected <field>=<value>"
+    name, _, raw = line.partition("=")
+    name, raw = name.strip(), raw.strip()
+    spec = {f.name: f for f in fields(cfg)}.get(name)
+    if spec is None or name in ("raw_brief", "missing"):
+        return f"unknown field {name!r}"
+
+    current = getattr(cfg, name)
+    try:
+        if isinstance(current, list):
+            value = [v.strip() for v in raw.split(",") if v.strip()]
+        elif isinstance(current, bool) or spec.type == "bool":
+            value = raw.lower() in ("1", "true", "yes", "y")
+        elif raw == "":
+            value = None if current is None else type(current)()
+        elif isinstance(current, float) or "float" in str(spec.type):
+            value = float(raw)
+        elif isinstance(current, int) and not isinstance(current, bool):
+            value = int(raw)
+        else:
+            value = raw
+    except ValueError as exc:
+        return f"could not parse {raw!r} for {name}: {exc}"
+
+    setattr(cfg, name, value)
+    if name in cfg.missing:
+        cfg.missing.remove(name)
+    return ""
+
+
+def _cmd_brief(args: argparse.Namespace) -> int:
+    """Extract a brief with Haiku, show it, let it be edited, then save it."""
+    from .brief import BriefInvalid, BriefRejected, extract, load, save
+
+    path = Path(args.source).expanduser()
+    out = Path(args.out) if args.out else config.WORK_DIR / "campaigns" / f"{path.stem}.json"
+
+    if args.reuse and out.is_file():
+        cfg = load(out)
+        print(f"loaded existing config: {out}")
+    else:
+        if not path.is_file():
+            print(f"FAILED: no such brief file: {path}", file=sys.stderr)
+            return 1
+        try:
+            cfg = extract(path.read_text(), model=args.model)
+        except BriefRejected as exc:
+            print(f"REJECTED\n{exc}", file=sys.stderr)
+            return 3
+        except (BriefInvalid, RuntimeError) as exc:
+            print(f"FAILED\n{exc}", file=sys.stderr)
+            return 2
+
+    _render_brief(cfg)
+    if args.no_confirm:
+        save(cfg, out)
+        print(f"\nsaved UNCONFIRMED: {out}  (S5 will refuse to run)")
+        return 0
+
+    print(EDITABLE_HELP)
+    while True:
+        try:
+            line = input("brief> ").strip()
+        except EOFError:
+            print()
+            return 1
+        if not line:
+            continue
+        if line in ("quit", "q"):
+            print("abandoned; nothing saved")
+            return 1
+        if line in ("list", "l"):
+            _render_brief(cfg)
+            continue
+        if line in ("confirm", "c"):
+            problems = cfg.validate()
+            if problems:
+                print(f"  cannot confirm — still missing: {', '.join(problems)}")
+                continue
+            cfg.confirmed = True
+            save(cfg, out)
+            print(f"confirmed and saved: {out}")
+            return 0
+        error = _apply_edit(cfg, line)
+        print(f"  {error}" if error else f"  {line.split('=')[0].strip()} updated")
+
+
 def _cmd_probe(args: argparse.Namespace) -> int:
     """Metadata only — judge a source before spending bandwidth on it."""
     try:
@@ -160,6 +279,15 @@ def main() -> int:
 
     sub.add_parser("check", help="run the startup environment gates and exit")
 
+    brief = sub.add_parser("brief", help="extract a campaign brief and confirm it")
+    brief.add_argument("source", help="a text file containing the brief")
+    brief.add_argument("--out", default=None, help="where to save the campaign config")
+    brief.add_argument("--model", default=None, help="override the extraction model")
+    brief.add_argument("--reuse", action="store_true",
+                       help="reload a saved config instead of re-extracting")
+    brief.add_argument("--no-confirm", action="store_true",
+                       help="extract and save without confirming (S5 will refuse it)")
+
     probe = sub.add_parser("probe", help="fetch a URL's metadata only, no download")
     probe.add_argument("url")
 
@@ -191,6 +319,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.command == "check":
         return _cmd_check()
+    if args.command == "brief":
+        return _cmd_brief(args)
     if args.command == "probe":
         return _cmd_probe(args)
     if args.command == "ingest":

@@ -16,6 +16,7 @@ def complete(
     max_tokens: int = 8192,
     temperature: float = 0.2,
     json_only: bool = False,
+    usage_sink: list | None = None,
 ) -> str:
     """Send one prompt, return the text. Raises on an empty completion.
 
@@ -43,16 +44,49 @@ def complete(
     else:
         kwargs["api_key"] = secrets.require_anthropic()
 
-    response = litellm.completion(**kwargs)
+    try:
+        response = litellm.completion(**kwargs)
+    except Exception as exc:  # noqa: BLE001 - re-raised with a usable hint
+        raise _with_model_hint(exc, model) from exc
+
     text = response.choices[0].message.content or ""
     if not text.strip():
         raise RuntimeError(f"{model} returned an empty completion.")
+
+    if usage_sink is not None:
+        usage = getattr(response, "usage", None)
+        usage_sink.append({
+            "model": model,
+            "input_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+            "output_tokens": getattr(usage, "completion_tokens", 0) or 0,
+            "cost_usd_range": config.cost_range_usd(
+                model,
+                getattr(usage, "prompt_tokens", 0) or 0,
+                getattr(usage, "completion_tokens", 0) or 0,
+            ),
+        })
     return text
 
 
-def rank_fn(prompt: str) -> str:
+def _with_model_hint(exc: Exception, model: str) -> Exception:
+    """A bad model id is the most likely first failure; say so precisely."""
+    text = str(exc).lower()
+    if "not_found" in text or "404" in text or "does not exist" in text:
+        base = model.split("/")[-1]
+        undated = base.rsplit("-20", 1)[0] if "-20" in base else base
+        return RuntimeError(
+            f"model {model!r} was rejected as unknown.\n"
+            f"  Current Anthropic model ids carry no date suffix — try "
+            f"'anthropic/{undated}'.\n"
+            f"  Original error: {exc}"
+        )
+    return exc
+
+
+def rank_fn(prompt: str, usage_sink: list | None = None) -> str:
     """The ranking tier (Sonnet). PLAN.md §5.2."""
-    return complete(prompt, model=config.RANKING_MODEL, json_only=True)
+    return complete(prompt, model=config.RANKING_MODEL, json_only=True,
+                    max_tokens=16000, usage_sink=usage_sink)
 
 
 def brief_fn(prompt: str) -> str:
