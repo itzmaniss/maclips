@@ -125,7 +125,7 @@ Each stage checkpoints its output and is cached by content hash (source hash + s
 | S1 | **Brief** (campaign only): paste brief → Haiku extracts config → you confirm in the form | Confirmed campaign config | Unconfirmed brief → S5 will not start. Brief category is crypto/gambling → rejected |
 | S2 | **Audio extract**: ffmpeg to 16 kHz mono WAV | `audio.wav` | — |
 | S3 | **Transcribe + align** (reused, `whispermlx`) | Word-level timestamped transcript | Aligned-word coverage below threshold (e.g. 97%); detected language ≠ expected |
-| S4 | **Diarize** (pyannote community-1, exclusive mode) → merge speaker labels onto words | Speaker-labelled word transcript | You gave an expected speaker count and it differs → stop and ask you to confirm |
+| S4 | **Diarize** (pyannote community-1, exclusive mode) → merge speaker labels onto words. **Must be fed an in-memory waveform, never a path — see §2.4** | Speaker-labelled word transcript | You gave an expected speaker count and it differs → stop and ask you to confirm |
 | S5 | **Rank** (Sonnet) with brief constraints | Candidate list: word-index spans, hook, rationale | Malformed JSON after one retry; fewer than 5 valid candidates after snapping and duration filtering |
 | S6 | **Visual analysis** on candidate windows only: shot boundaries (ffmpeg `scdet`), Apple Vision faces and mouth landmarks at ~5 fps, per-shot IoU tracking | Face tracks per shot | A candidate with no face track at all → that candidate gets letterbox layout only |
 | S7 | **Speaker attribution + layout planning** | Per-clip crop plans: follow-crop, split-screen | Attribution confidence below threshold on more than X% of clip duration → **follow-crop blocked for that clip** (split or letterbox only) |
@@ -166,7 +166,87 @@ Each stage checkpoints its output and is cached by content hash (source hash + s
 - **Previews:** `h264_videotoolbox` for speed. Quality doesn't matter at 540p.
 - **Final:** `libx264` at CRF ~18. A 60-second clip encodes in seconds on an M4 Pro. Platforms re-encode on upload, so start from high quality. [R]
 - **Audio:** `loudnorm` in the same pass. Podcast source levels vary. A single-pass target around −14 LUFS is conventional for short-form. [R]
-- **Captions:** ASS subtitles burned with libass. Confirm your ffmpeg build has it: `ffmpeg -filters | grep ass`. Homebrew's ffmpeg does. [R]
+- **Captions:** ASS subtitles burned with libass.
+  **Homebrew's default `ffmpeg` formula does NOT have libass. [V]** As of
+  Homebrew 7.0 it is a slim build (11 dependencies, no libass, freetype or
+  fontconfig), so the `ass`, `subtitles` **and** `drawtext` filters are all
+  absent — that breaks burned captions *and* the hook/commentary overlays.
+  Use `ffmpeg-full` (47 dependencies, includes libass/freetype/fontconfig/
+  harfbuzz). It is **keg-only**, so it is never on PATH.
+  Do not mutate PATH. The pipeline addresses the binaries by absolute path
+  through two settings read from `.env`:
+
+  ```
+  MACLIPS_FFMPEG   default /opt/homebrew/opt/ffmpeg-full/bin/ffmpeg
+  MACLIPS_FFPROBE  default /opt/homebrew/opt/ffmpeg-full/bin/ffprobe
+  ```
+
+  The startup gate probes these *same* binaries, so the gate cannot pass
+  against a different build than the pipeline runs. Verified present on
+  ffmpeg-full 9.0.2: `ass`, `subtitles`, `drawtext`, `scdet`, `crop`, `scale`,
+  `loudnorm`, `concat`, `hstack`, `vstack`, `sendcmd`, `libx264`,
+  `h264_videotoolbox`. [V]
+
+  Note: installing `ffmpeg-full` upgrades x265, which breaks an older slim
+  `ffmpeg` still in the Cellar (it links `libx265.216`; x265 4.3 ships `.217`).
+  Harmless here because nothing resolves ffmpeg via PATH, but `brew upgrade
+  ffmpeg` or `brew uninstall ffmpeg` keeps the rest of the system working. [V]
+
+### 2.4 The torch / torchcodec version window (S4) [V]
+
+**This is a one-version window, and it is load-bearing. Verified in build
+step 1 by installing the stack and importing it.**
+
+`whispermlx` 3.13.1 requires `torch~=2.8.0` — that is torch 2.8.x only, while
+current torch is 2.14. `pyannote.audio` 4.0.7 in turn requires
+`torchcodec>=0.7.0`. **`torchcodec` declares no torch dependency at all**, so a
+resolver picks the newest (0.16.0) and the mismatch is invisible at resolve
+time and fatal at import time:
+
+```
+OSError: Symbol not found: _torch_call_dispatcher
+  Expected in: torch/lib/libtorch_cpu.dylib
+```
+
+Per torchcodec's own compatibility table, exactly one release satisfies both
+pyannote's `>=0.7.0` floor and torch 2.8.x:
+
+| torchcodec | requires torch | |
+|---|---|---|
+| 0.6 | 2.8 | below pyannote's floor |
+| **0.7** | **2.8** | **the only viable version** |
+| 0.8 – 0.9 | 2.9 | too new for whispermlx |
+| 0.10 | 2.10 | " |
+| 0.11+ | ≥2.11 | " |
+
+So `torchcodec==0.7.0` is pinned explicitly. **Any dependency upgrade must
+re-verify that `import torchcodec` actually loads** — `uv lock` succeeding
+proves nothing here, because the incompatibility is not expressible in
+metadata. Treat `uv run python -c "import torchcodec"` as part of the upgrade
+checklist.
+
+**Consequence for S4: diarization must receive an in-memory waveform, never a
+file path.**
+
+torchcodec 0.7 links against FFmpeg 4–7 (`libavutil.56`–`59`). This machine
+runs ffmpeg 8/9 (`libavutil.60`+), so torchcodec's decode path cannot load its
+dylib *at all* here. What makes this survivable: `import pyannote.audio`,
+`Pipeline` and `whispermlx` all import fine regardless — torchcodec is only
+touched when pyannote is asked to **decode a media file itself**. Therefore:
+
+- S2 already produces a 16 kHz mono WAV. Load it and hand pyannote a tensor:
+  `pipeline({"waveform": waveform, "sample_rate": 16000})`.
+- Never pass a path into the diarization pipeline.
+
+**Step 2 action item.** Check how `whispermlx`'s own diarization wrapper
+(`DiarizationPipeline` or equivalent) loads audio. **If it passes a file path
+through to pyannote, do not use it — call pyannote directly** with the
+in-memory waveform. Settle this before benchmarking, because the failure mode
+is an import-time crash inside a library call, not a clear error at the seam.
+
+Fallback if a decode path is ever genuinely needed: `brew install ffmpeg@7`
+(keg-only) supplies `libavutil.59` without disturbing the ffmpeg-full build
+used for encoding. Not needed under the in-memory-waveform design.
 
 ---
 
@@ -174,9 +254,9 @@ Each stage checkpoints its output and is cached by content hash (source hash + s
 
 | Component | Origin | Notes |
 |---|---|---|
-| Transcription + wav2vec2 alignment | **Reused**: your `whispermlx` stage | Runs on the Apple GPU via MLX. No reimplementation. |
+| Transcription + wav2vec2 alignment | **Integrated, not reused** — see note below | `whispermlx` is a PyPI package (3.13.1). There was no pre-existing stage of yours in this repo to wire up. |
 | Caption data | **Reused**: alignment output | Only the renderer is new (ASS word-highlight instead of SRT). |
-| Orchestrator (checkpointing, hash cache, hard gates) | **Reused** | Same pattern, new stage list. |
+| Orchestrator (checkpointing, hash cache, hard gates) | **Built in step 1** — see note below | Written from this section's stage list; there was no existing orchestrator in this repo. |
 | Pipeline entry, `get_highlights(..., llm_fn=)` seam, ranking prompt, subclip logic | **From fork** (MIT, keep the upstream copyright notice) | The prompt is rewritten substantially (§5). |
 | MuAPI `mode="api"` path | **Deleted** | Local only. |
 | `faster-whisper`, Haar cascade, OpenCV video writer, two-pass encode | **Deleted** | — |
@@ -187,6 +267,22 @@ Each stage checkpoints its output and is cached by content hash (source hash + s
 | One-pass final renderer | **Built** | ffmpeg `filter_complex`. |
 | Web UI (Ingest / Review / Posted) | **Built** | — |
 | SQLite tracking, export bundles | **Built** | — |
+
+**Correction after build step 1 [V].** This table originally listed the
+orchestrator and the `whispermlx` transcription stage as *"Reused: your
+existing…"*. Neither existed in this repository, and no other location was
+identified. What actually happened:
+
+- **The orchestrator was written from scratch in step 1**, to the §2.1 stage
+  list — content-hash caching, per-stage checkpointing, hard gates. It is not
+  a port of an earlier pattern.
+- **`whispermlx` is a third-party PyPI package**, not your own stage. So
+  **build step 2 is an integration task, not a wiring-up task**, and should be
+  estimated as such: install, feed it audio, handle its output shape, and deal
+  with the dependency constraint recorded under S4 below.
+
+If a prior orchestrator or transcription stage does exist in another project,
+it was not available to step 1 and nothing here depends on it.
 
 **A note on the fork's value.** After these replacements, what survives from the fork is a skeleton, one seam, and a prompt draft. Expect it to be a small fraction of the final code. That is fine: the fork is a starting scaffold, not a dependency. Don't let "stay close to upstream" constrain design choices. [I]
 
@@ -314,8 +410,27 @@ If the heuristic misses the threshold on two-shot sources:
 ### 5.2 Model and cost
 
 - **Model: Sonnet (`claude-sonnet-5`).** This deliberately breaks your "ranking → Haiku" tiering rule. This ranking is the quality-critical judgement that decides which moments ever reach approval.
-- **Cost:** ~30k input plus ~4k output tokens per source ≈ **$0.15 per source** at $3 / $15 per million tokens. The rate comes from third-party pricing pages; confirm on Anthropic's pricing page before budgeting. [V-ish]
-- **Haiku 4.5** ($1 / $5 per million tokens) is used for:
+- **Cost: [U] — the Sonnet 5 rate is disputed and this number is not settled.**
+  Sources conflict on whether Sonnet 5's introductory pricing became
+  permanent: **$2 / $10** per million tokens (input/output) and **$3 / $15**
+  are both cited. At ~30k input plus ~4k output per source that is
+  **$0.10 or $0.15 per source** — a 50% spread on the headline cost figure.
+
+  Two further reasons not to trust either number yet:
+
+  - **Tokenizer.** The current-generation tokenizer can consume up to
+    **~1.35× more tokens** for the same text than earlier models, so a token
+    count estimated from older assumptions understates the bill. Re-baseline
+    with `count_tokens` rather than reasoning from character counts. [R]
+  - The 30k input figure is itself an estimate (§5.1), not a measurement.
+
+  **Resolution: measure, don't budget.** Step 4 logs real `usage` (input,
+  output, and cache-read tokens) per ranking call, so the cost per source is a
+  measured number by the time it feeds the business gate (§1.5). Do not put a
+  cost assumption on the critical path before then.
+
+- **Haiku 4.5** ($1 / $5 per million tokens [R]; model id `claude-haiku-4-5`,
+  no date suffix) is used for:
   - brief field extraction, with human confirmation;
   - commentary drafts, with human acceptance.
 
@@ -519,7 +634,7 @@ Each step has a "done when". Arrows show what it blocks.
 | Step | Work | Done when | Blocks |
 |---|---|---|---|
 | 1 | **Fork and strip.** Delete the MuAPI path, faster-whisper, Haar, and OpenCV writer. Wire in your orchestrator (stages, cache, gates). Keep the MIT notice. | Stub pipeline runs end to end on one file with dummy stages. | Everything |
-| 2 | **S2–S4.** Plug in `whispermlx`; add pyannote community-1 (accept the HF gate, cache weights for offline use); merge speakers onto words. **Benchmark on the M4 Pro:** wall time for a 2-hour source, split into transcription and diarization. | Speaker-labelled transcript for three real podcasts; timings recorded. | 4 |
+| 2 | **S2–S4.** Integrate `whispermlx` (a PyPI package, not an existing stage of yours — see §3); add pyannote community-1 (accept the HF gate, cache weights for offline use); merge speakers onto words. **Respect the §2.4 version window:** `torch==2.8.0` + `torchcodec==0.7.0`, and feed diarization an in-memory 16 kHz waveform from the S2 WAV, never a path. **First check whether whispermlx's diarization wrapper passes a path to pyannote; if it does, call pyannote directly.** **Benchmark on the M4 Pro:** wall time for a 2-hour source, split into transcription and diarization. | Speaker-labelled transcript for three real podcasts; timings recorded; `import torchcodec` verified to load. | 4 |
 | 3 | **S1 brief.** Schema, Haiku extraction, confirm form. Runs in parallel with step 2. | Five real Whop briefs pasted, extracted, and corrected; extraction errors noted. | 4 |
 | 4 | **S5 ranking.** Prompt, schema, snapping, filters. | Candidates for three sources. You judge at least half as worth reviewing. | 5 |
 | 5 | **Minimal Review + render.** Ingest and Review tabs; centre-crop and letterbox layouts; ASS word-highlight captions; hook overlay; one-pass final render; export bundle; Posted tab. | **You can run a real campaign end to end.** Start doing campaigns here. | 6, 8 |
