@@ -90,6 +90,19 @@ FFPROBE = Path(
 WORK_DIR = Path(os.getenv("MACLIPS_WORK_DIR", PROJECT_ROOT / "work")).expanduser()
 DB_PATH = Path(os.getenv("MACLIPS_DB_PATH", WORK_DIR / "maclips.db")).expanduser()
 
+# S1 capture (src/maclips/capture.py). BRIEFS_RAW_DIR is *not* under WORK_DIR:
+# it holds other people's campaign documents and is gitignored at the repo
+# root (briefs/raw/), never inside work/ which has its own ignore rules.
+# BROWSER_PROFILE_DIR is a persistent Chromium profile so a login (Content
+# Rewards / Whop) survives across `capture` invocations instead of asking for
+# it every run.
+BRIEFS_RAW_DIR = Path(
+    os.getenv("MACLIPS_BRIEFS_RAW_DIR", PROJECT_ROOT / "briefs" / "raw")
+).expanduser()
+BROWSER_PROFILE_DIR = Path(
+    os.getenv("MACLIPS_BROWSER_PROFILE_DIR", WORK_DIR / "browser_profile")
+).expanduser()
+
 
 @dataclass(frozen=True)
 class Secrets:

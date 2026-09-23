@@ -12,6 +12,7 @@ dependencies = [
     "jinja2==3.1.6",
     "litellm==1.102.0",
     "mlx==0.32.2",
+    "playwright>=1.63.0",
     "pyannote-audio==4.0.7",
     "pyobjc-framework-vision==12.2.2",
     "python-dotenv==1.2.3",

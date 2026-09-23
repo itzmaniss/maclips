@@ -31,6 +31,12 @@ __pycache__/
 /output/
 /models/
 
+# Captured campaign briefs (other people's documents, not for the public repo)
+/briefs/raw/
+
+# Playwright MCP scratch output (page snapshots, console logs, downloads)
+/.playwright-mcp/
+
 # From upstream fork base
 venv/
 *.mp4

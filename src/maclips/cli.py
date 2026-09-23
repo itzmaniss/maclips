@@ -152,6 +152,42 @@ def _cmd_brief(args: argparse.Namespace) -> int:
         print(f"  {error}" if error else f"  {line.split('=')[0].strip()} updated")
 
 
+def _cmd_capture(args: argparse.Namespace) -> int:
+    """S1 front door: fetch a campaign URL into briefs/raw/, then optionally
+    run it straight through S1 extraction (the existing `brief` flow)."""
+    from .capture import CaptureError, capture_campaign
+
+    try:
+        result = capture_campaign(
+            args.url,
+            out_dir=Path(args.out) if args.out else None,
+            headless=args.headless,
+        )
+    except CaptureError as exc:
+        print(f"FAILED\n{exc}", file=sys.stderr)
+        return 1
+
+    print(f"captured  : {result.path}")
+    print(f"title     : {result.title}")
+    if result.fetched_docs:
+        print("linked docs pulled in (Google Docs / Notion allowlist):")
+        for u in result.fetched_docs:
+            print(f"  {u}")
+    if result.undecided_links:
+        print(f"reference links NOT fetched, for you to decide ({len(result.undecided_links)}):")
+        for u in result.undecided_links:
+            print(f"  {u}")
+
+    if not args.extract:
+        print(f"\nnext: uv run maclips brief {result.path}")
+        return 0
+
+    brief_args = argparse.Namespace(
+        source=str(result.path), out=None, model=None, reuse=False, no_confirm=False,
+    )
+    return _cmd_brief(brief_args)
+
+
 def _cmd_probe(args: argparse.Namespace) -> int:
     """Metadata only — judge a source before spending bandwidth on it."""
     try:
@@ -288,6 +324,15 @@ def main() -> int:
     brief.add_argument("--no-confirm", action="store_true",
                        help="extract and save without confirming (S5 will refuse it)")
 
+    capture = sub.add_parser("capture", help="fetch a campaign URL into briefs/raw/ (S1 front door)")
+    capture.add_argument("url", help="the campaign page to capture")
+    capture.add_argument("--out", default=None, help="override briefs/raw/")
+    capture.add_argument("--headless", action="store_true",
+                         help="no login pause; needs a session already saved in "
+                              "the browser profile from a prior headful capture")
+    capture.add_argument("--extract", action="store_true",
+                         help="immediately run the captured file through `brief`")
+
     probe = sub.add_parser("probe", help="fetch a URL's metadata only, no download")
     probe.add_argument("url")
 
@@ -321,6 +366,8 @@ def main() -> int:
         return _cmd_check()
     if args.command == "brief":
         return _cmd_brief(args)
+    if args.command == "capture":
+        return _cmd_capture(args)
     if args.command == "probe":
         return _cmd_probe(args)
     if args.command == "ingest":
