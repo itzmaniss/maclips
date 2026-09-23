@@ -1330,6 +1330,33 @@ malformed JSON: two calls, then the exit.
   not run. `work/experiment/` is still empty. Spend: **$0.4781** of $1.50.
   Raw replies and the ledger are in `work/session-20260923f/` (gitignored).
 
+### 5.2f Review materials, session 2026-09-23g [V]
+
+- Reconstructed A1 and A2 from session f's raw replies using committed
+  `parse_candidates` and `post_process`: 12/12 each, no API calls.
+  `work/session-20260923g/benchmark-blind-sheet.md` has 18 distinct moments.
+  The key was written programmatically and not opened. Ratings remain pending.
+  The labelled comparison is deliberately incomplete [user decision].
+- Real candidate-window diarization: **24 windows, 2563.719 s of padded
+  audio, 191.921 s wall**, one pipeline reused. Significant speakers
+  per window (A1 then A2): `[2, 1, 2, 2, 2, 2, 2, 2, 2, 2, 1, 2, 2, 1, 2, 2, 2, 2, 2, 1, 1, 1, 3, 1]`. No expected count was supplied.
+  This ran the S4 implementation in a measurement script, not via the CLI;
+  it replaces the placeholder-window timing for these 24 spans only.
+- Second source: real CLI entry point with an API spend wrapper, requested
+  `--from S5 --language en --clip-class general-own`. S0–S3 recomputed
+  (S3 127.66 s), rather than loading the earlier cache. The cache-miss cause
+  remains [U]; no cache keys were overwritten to force reuse.
+  S5 stopped at malformed JSON after its one retry. No candidates or second
+  sheet, and S4 onward did not execute. No prompt changes or further calls.
+- Ledger: call 1 **16,495 input / 1,175 output / 20 reasoning**, 14.018 s,
+  **$0.044740**; retry **16,566 / 1,013 / 0**, 11.028 s,
+  **$0.043262**. Both finish `stop`, cache read/write zero.
+  Total **$0.088002 of $0.50**, at $2/$10 per MTok. Only Phase 0 spent.
+  Raw replies, ledger and logs are under `work/session-20260923g/`.
+- Phase 0's gate exception applies: stop that run and continue render work.
+  The second source cannot supply real candidates for later face-track tests
+  until ranking succeeds; no failed reply was repaired or salvaged.
+
 ### 5.2d Brief extraction fix, 2026-09-23 [V]
 
 **Diagnosis first.** Each of the 8 captured files was checked for the
@@ -1408,9 +1435,9 @@ and retention requirements (§5.2c).
 
 ### 5.3 Prompt contract
 
-Input lines carry the word index and the sentence's start time (§5.1). The
-time is for judging length only; the output contract below has no time
-field, and the prompt forbids outputting one.
+Input lines carry the first word's index, without start times [V, current
+`ranking.build_transcript`]. The output contains word indices only; timestamps
+are resolved from alignment data. Start times were removed in `c95e4ba`.
 
 The prompt asks for JSON only. **JSON is enforced client-side only [V]:**
 `rank_fn` passes `response_format={"type": "json_object"}`, but LiteLLM
