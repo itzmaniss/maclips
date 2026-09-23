@@ -774,7 +774,7 @@ If the heuristic misses the threshold on two-shot sources:
 ### 5.1 Input
 
 - The full transcript, one line per sentence, prefixed with the first word index. **Not speaker-labelled**: diarization moved behind ranking in step 2b (§2.2 item 1), so speaker labels do not exist yet at S5. Use `--full-diarization` to produce a labelled transcript for the step-4 comparison.
-- A 2-hour podcast is roughly 25–35k tokens [I], so it fits in one call. No chunking, and no loss of cross-section context.
+- A 2-hour podcast measured **44,014 tokens** unlabelled and **62,833** speaker-labelled (`count_tokens`, `claude-sonnet-5`, full ranking prompt, §5.2b) [V] — not the 25–35k first estimated. It still fits in one call. No chunking, and no loss of cross-section context.
 
 ### 5.2 Model and cost
 
@@ -813,19 +813,20 @@ benchmark transcript, not model usage.
 
 **Transcript size, measured on 19,625 real words (§2.6b's source):**
 
-| form | sentences | characters | rough token estimate |
-|---|---|---|---|
-| unlabelled (what S5 sees) | 2,095 | 118,410 | ~29.6k |
-| speaker-labelled | 2,095 | 143,502 | ~35.9k |
+| form | sentences | characters | first estimate (`chars / 4`) | measured prompt tokens [V] |
+|---|---|---|---|---|
+| unlabelled (what S5 sees) | 2,095 | 118,410 | ~29.6k | **44,014** |
+| speaker-labelled | 2,095 | 143,502 | ~35.9k | **62,833** |
 
-The unlabelled figure lands inside §5.1's 25-35k estimate. Two caveats: the
-estimate is `chars / 4`, not a tokenizer count, and §5.2 warns the current
-tokenizer can use up to ~1.35x more tokens than older assumptions — so treat
-this as an order-of-magnitude check, not a budget. `count_tokens` settles it.
+Measured 2026-09-23 with the free `count_tokens` endpoint on `claude-sonnet-5`,
+over the full prompt `ranking.rank` builds (119,783 / 144,875 characters
+including instructions). The count is identical with and without
+`thinking: disabled`. The unlabelled count equals the failed live call's
+`prompt_tokens` exactly (§5.2c). The `chars / 4` estimate was **1.47x too low**
+(about 2.7 characters per token on this transcript).
 
-**Speaker labels add 21.2% more characters [V], not measured tokens or
-cost.** The actual token and price overhead remains unmeasured until the
-live ranking calls succeed.
+**Speaker labels add 21.2% more characters but 42.8% more tokens [V]**
+(+18,819 tokens, about +$0.038 input per source at $2/MTok).
 
 **Cost is reported as a range, not a number.** Because the Sonnet 5 rate is
 disputed ($2/$10 vs $3/$15, §5.2), every logged call carries both figures and
@@ -898,13 +899,59 @@ agrees with independent budget figures, so extracting that amount does not
 prove instruction-following. The injection fixture has since been run against
 the real model: **[V] for that fixture**, see §5.2d.
 
-**Ranking experiment: running.** Session-only instrumentation calls the
-existing experiment, preserves completed runs/API usage, checks audio and
-model access, and enforces the same five-survivor gate as S5. The original
-experiment ignores `meta["insufficient"]`, skips absent audio, and only saves
-runs after diarization; these behaviors were not silently accepted. The API
-usage record supplements the client's missing cache-token logging. Prompts,
-selection, snapping, durations and overlap comparisons remain unchanged.
+**Ranking experiment: failed on its first call [V].** Session-only
+instrumentation wrapped the existing experiment (it enforces the same
+five-survivor gate as S5, checks audio and model access, and records raw API
+usage, because the client logs none of it on failure). Run A1 (unlabelled)
+made **one** call: `prompt_tokens=44,014`, `completion_tokens=16,000`, all of
+them `reasoning_tokens` and **0 text tokens**. It took 181 s, and the model
+returned `claude-sonnet-5`. `llm.complete` raised "returned an empty
+completion". Cost: **$0.25** (44,014 × $2 + 16,000 × $10 per MTok). No
+candidates, no blind sheet and no real-window diarization timing exist;
+`work/experiment/` is empty. A2, B1 and B2 never ran.
+
+**Diagnosis (session 2026-09-23b, no further live calls) [V]:**
+
+- *Thinking was on, and we never asked for it.* The request LiteLLM 1.102.0
+  sends for `rank_fn` was captured offline (HTTP post patched, fake key, no
+  network): `{"model": "claude-sonnet-5", "messages": [...], "temperature": 1,
+  "max_tokens": 16000}`. It has no `thinking`, no `output_config`, no tool
+  and no beta header. The Anthropic docs say: "On Claude Sonnet 5, where
+  thinking is on by default", with effort `high` by default and `display`
+  `"omitted"`. They also say "`max_tokens` is a hard cap on total output for
+  the request, thinking and response text combined". The model spent the
+  whole 16,000-token cap thinking and never reached the JSON.
+- *`response_format={"type": "json_object"}` never reaches the API.* With no
+  schema attached, LiteLLM's Anthropic transformation maps it to nothing
+  (`llms/anthropic/chat/transformation.py` 1312-1326, 1512-1533). JSON-only is
+  enforced by the prompt alone. This is the same class of bug as §5.2d.
+- *The error message hid the truncation.* `llm.complete` checks for empty
+  text before it checks `finish_reason == "length"`, so a max-tokens stop
+  reads as "empty completion". The error is raised outside `ranking.rank`'s
+  parse `try`, so the retry did not run: one call, not two.
+- *`temperature=1` is harmless but unnecessary.* The docs say Sonnet 5
+  rejects *non-default* sampling values, and LiteLLM passes 1 through only
+  because it equals the default. Omitting temperature sends nothing.
+- *LiteLLM trap [V]:* `reasoning_effort="none"` sends no thinking field at
+  all, so thinking stays on. Only `thinking={"type": "disabled"}` reaches
+  the API as "disabled". `reasoning_effort="low"` or `"medium"` maps to
+  adaptive thinking plus `output_config.effort`.
+- *Usage logging gap [V].* `llm.complete` appends usage only after both
+  raise checks pass. It records no reasoning tokens, no cache tokens and no
+  finish reason, so a failed call leaves no record.
+
+**Pricing settled [V].** Anthropic's pricing page (fetched 2026-09-23) says:
+"The $2/$10 … pricing for Claude Sonnet 5, announced at launch as
+introductory pricing through August 31, 2026, is now the standard price. The
+previously scheduled increase to $3/$15 … will not occur." The dispute in
+§5.2 and the $3/$15 entry in `config.DISPUTED_RATES_USD_PER_MTOK` are stale.
+They are not changed here.
+
+**Open, for the user [decision]:** whether ranking should think at all. The
+options are: thinking disabled (≈2k output, ≈$0.11/source unlabelled, tens of
+seconds [I]); adaptive at `low`/`medium` effort with a larger cap (thinking
+length [U]); or default `high` with a 64k cap and streaming (≥16k thinking
+observed, up to ≈$0.73/source). No fix is applied yet.
 
 The built-in comparison verdict uses a fixed 15-percentage-point heuristic,
 not a significance test. Report within-condition noise before cross-condition
