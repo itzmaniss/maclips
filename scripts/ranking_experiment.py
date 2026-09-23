@@ -5,6 +5,7 @@
 Four ranking runs over work/bench/transcript.json:
   A1, A2 — unlabelled transcript (what S5 actually sees since step 2b)
   B1, B2 — speaker-labelled transcript (from the cached full diarization)
+  C1, C2 — unlabelled, on Haiku 4.5 (experiment only; S5 stays on Sonnet)
 
 Reports run-to-run overlap within each condition and across them, logs tokens
 and cost per call at the $2/$10 Sonnet 5 rate, re-measures window
@@ -19,11 +20,18 @@ from pathlib import Path
 from maclips import config, ranking
 from maclips.bench import measure
 from maclips.experiment import Run, blind_sheet, compare, save_key
-from maclips.llm import rank_fn
+from maclips.llm import complete, rank_fn
 
 TRANSCRIPT = config.WORK_DIR / "bench" / "transcript.json"
 OUT = config.WORK_DIR / "experiment"
 COUNT = 12
+HAIKU_MODEL = "anthropic/claude-haiku-4-5"
+
+
+def haiku_fn(prompt: str, usage_sink: list | None = None) -> str:
+    """Haiku 4.5 takes no effort parameter and no adaptive thinking: none is sent."""
+    return complete(prompt, model=HAIKU_MODEL, json_only=True, max_tokens=16000,
+                    temperature=None, usage_sink=usage_sink)
 
 
 def load_words() -> list[dict]:
@@ -33,11 +41,13 @@ def load_words() -> list[dict]:
     return json.loads(TRANSCRIPT.read_text())["words"]
 
 
-def one_run(label: str, condition: str, words: list[dict]) -> Run:
+def one_run(label: str, condition: str, words: list[dict]) -> Run | None:
     usage: list = []
 
+    fn = haiku_fn if condition == "haiku" else rank_fn
+
     def call(prompt: str) -> str:
-        return rank_fn(prompt, usage_sink=usage)
+        return fn(prompt, usage_sink=usage)
 
     with measure(f"rank {label}") as m:
         candidates, meta = ranking.rank(
@@ -46,10 +56,15 @@ def one_run(label: str, condition: str, words: list[dict]) -> Run:
         )
     tokens = sum(u["input_tokens"] for u in usage), sum(u["output_tokens"] for u in usage)
     reasoning = sum(u["reasoning_tokens"] for u in usage)
-    cost = config.estimated_cost_usd(config.RANKING_MODEL, *tokens)
+    cost = sum(u["cost_usd"] for u in usage)
     print(f"-> {label} ({condition}): {len(candidates)} candidates in {m.wall_s:.1f}s | "
           f"in={tokens[0]} out={tokens[1]} reasoning={reasoning} | cost ${cost:.3f} | "
           f"attempts={meta['attempts']} dropped={meta['dropped']}", flush=True)
+    if meta.get("insufficient") and condition == "haiku":
+        # Gated per model: a Haiku failure does not stop the Sonnet runs.
+        print(f"GATED: {label} kept {len(candidates)}; left out of the comparison.",
+              file=sys.stderr)
+        return None
     if meta.get("insufficient"):
         # The S5 five-survivor gate (§5.4 item 5): stop before any further call.
         print(f"STOPPED: {label} kept {len(candidates)}, fewer than "
@@ -68,16 +83,18 @@ def main() -> int:
     runs = [
         one_run("A1", "unlabelled", unlabelled),
         one_run("A2", "unlabelled", unlabelled),
+        one_run("C1", "haiku", unlabelled),
+        one_run("C2", "haiku", unlabelled),
         one_run("B1", "labelled", words),
         one_run("B2", "labelled", words),
     ]
+    runs = [r for r in runs if r is not None]
 
     total_in = sum(u["input_tokens"] for r in runs for u in r.usage)
     total_out = sum(u["output_tokens"] for r in runs for u in r.usage)
-    total = config.estimated_cost_usd(config.RANKING_MODEL, total_in, total_out)
-    print(f"\ntotal: in={total_in} out={total_out} cost ${total:.3f} across 4 runs", flush=True)
-    per_source = config.estimated_cost_usd(config.RANKING_MODEL, total_in // 4, total_out // 4)
-    print(f"per source (1 run): ${per_source:.3f}", flush=True)
+    total = sum(u["cost_usd"] for r in runs for u in r.usage)
+    print(f"\ntotal: in={total_in} out={total_out} cost ${total:.3f} across {len(runs)} runs",
+          flush=True)
 
     print("\n=== span overlap (IoU >= 0.5 counts as the same moment) ===", flush=True)
     result = compare(runs)

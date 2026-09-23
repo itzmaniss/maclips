@@ -1148,11 +1148,43 @@ stopped at the gate [V].** The benchmark source was run through
   show that times make things worse.
 - **Stopped there, per the session's rule.** A2, B1, B2, the real-window
   diarization, the blind sheet and the second source's S5 did not run.
-  `work/experiment/` is still empty. No further prompt change was made.
+  `work/experiment/` is still empty. No further prompt change was made. The
+  Haiku arm below ran afterwards, on the user's instruction.
 - **Cost with times: $0.13 a call** (60.9k input), up from $0.10. A gated
-  run with a retry costs $0.27. Session spend: **$0.27** ($0.267116) against
-  a $3.00 cap. Raw outputs and the ledger are in
-  `work/session-20260923d/` (gitignored).
+  run with a retry costs $0.27.
+
+**Haiku arm, same session: C1 passed, C2 failed [V].** The user added two
+unlabelled Haiku 4.5 runs, with the same prompt and transcript, as an
+experiment only. S5, `rank_fn` and `config.RANKING_MODEL` stay on Sonnet.
+`scripts/ranking_experiment.py` calls `llm.complete` with
+`anthropic/claude-haiku-4-5`, `max_tokens=16000`, no temperature, no
+thinking and no effort. The body LiteLLM 1.102.0 sends was captured offline:
+`{"model": "claude-haiku-4-5", "messages": [...], "max_tokens": 16000}`.
+Haiku's tokenizer counts this prompt as **51,457** tokens unlabelled and
+61,912 labelled (Sonnet: 60,906 and 79,725). Haiku failures are gated per
+model: they leave the run out of the comparison and do not stop the Sonnet
+runs.
+
+| run | input | output | reasoning | finish | wall | cost | survivors |
+|---|---|---|---|---|---|---|---|
+| C1 Haiku | 51,457 | 1,156 | 0 | stop | 15.2 s | $0.0572 | **6 / 12** |
+| C2 Haiku | 51,457 | 1,215 | 0 | stop | 14.0 s | $0.0575 | **4 / 12** |
+
+- Both returned valid JSON on the first attempt. All drops were duration
+  drops (6 and 8), with no overlap and no out-of-range drops.
+- Before snapping, C1 had 4/12 spans over 60 s (median 53.3 s, max 95.4 s)
+  and C2 had 6/12 (median 59.5 s, max 88.6 s). Each run's first candidate is
+  an 8.7 s span at 0:01.
+- **Haiku ignored the coverage rule:** every candidate in both runs starts in
+  the first 1,520 s of the 7,066 s source, so the last 79% has none. Sonnet's
+  A1 retry spanned 131-6,431 s.
+- **Neither model passed both runs, so the session stopped** before 3b and
+  3c. Choosing the model, or making a further prompt change, is the user's
+  decision.
+
+Session spend: **$0.38** ($0.381885) against a $3.00 cap: Sonnet $0.2671
+and Haiku $0.1148. Raw outputs and the ledger are in
+`work/session-20260923d/` (gitignored).
 
 **The CLI has no stop-before-stage option [V].** `maclips run` has `--from`
 but no `--to`/`--until`, and `orchestrator.run_pipeline` stops only at a
