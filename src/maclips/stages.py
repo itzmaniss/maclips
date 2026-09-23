@@ -482,11 +482,8 @@ def s10_commentary(ctx: RunContext) -> StageOutput:
 
 def s11_compliance(ctx: RunContext) -> StageOutput:
     """Mechanical checks against the confirmed brief and the class rules."""
-    # STUB: build step 8 implements one check per rule in §7.2.
-    failures = list(_cfg(ctx, "stub_compliance_failures", []) or [])
-    if failures:
-        raise GateFailure("S11", f"compliance failures block export: {'; '.join(failures)}")
-    return {"passed": True, **STUB}
+    from .export import compliance_stage
+    return compliance_stage(ctx)
 
 
 # --------------------------------------------------------------------------- #
@@ -501,21 +498,14 @@ def s12_final_render(ctx: RunContext) -> StageOutput:
 
 def s13_export_bundle(ctx: RunContext) -> StageOutput:
     """Per clip per platform: MP4, caption.txt, checklist.md."""
-    return {"bundles": [], **STUB}
+    from .export import export_stage
+    return export_stage(ctx)
 
 
 def s14_post_track(ctx: RunContext) -> StageOutput:
     """Manual post, then the tracking row. Disclosure is your attestation."""
-    rows = list(_cfg(ctx, "post_rows", []) or [])
-    is_campaign = ctx.output("S0")["clip_class"] == "campaign"
-    for row in rows:
-        if is_campaign and not row.get("disclosure_ticked"):
-            raise GateFailure(
-                "S14",
-                f"campaign clip {row.get('clip_id')} cannot be marked submitted "
-                "without the paid-promotion checkbox.",
-            )
-    return {"tracked": rows, **STUB}
+    from .export import post_stage
+    return post_stage(ctx)
 
 
 STAGES: tuple[StageSpec, ...] = (
@@ -555,15 +545,15 @@ STAGES: tuple[StageSpec, ...] = (
     StageSpec("S10", "commentary", "Resolve commentary text", s10_commentary,
               needs=("S9",), gate="Unaccepted auto-generated text blocks final render"),
     StageSpec("S11", "compliance", "Brief + class rule checks", s11_compliance,
-              needs=("S10",), params=("stub_compliance_failures",),
+              needs=("S10",), version=2,
               gate="Any mechanical failure blocks the clip"),
     StageSpec("S12", "final-render", "One-pass 1080x1920 libx264 encode", s12_final_render,
               needs=("S11",), version=2,
               gate="Duration drift > 0.1s; wrong resolution; no audio stream"),
     StageSpec("S13", "export-bundle", "MP4 + caption.txt + checklist.md", s13_export_bundle,
-              needs=("S12",), gate=""),
+              needs=("S12",), version=2, gate=""),
     StageSpec("S14", "post-track", "Log the post URL and disclosure", s14_post_track,
-              needs=("S13",), params=("post_rows",),
+              needs=("S13",), params=("post_rows",), version=2,
               gate="Campaign clip without the disclosure tick cannot be submitted"),
 )
 

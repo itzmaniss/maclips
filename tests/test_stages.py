@@ -17,7 +17,7 @@ from maclips.transcribe import Transcript, Word
 
 
 @pytest.fixture(autouse=True)
-def no_models(monkeypatch):
+def no_models(monkeypatch, tmp_path):
     """Keep every test off the GPU, the model cache and the network."""
     def fake_run(waveform, model_name=None, language=None, on_stage=None):
         return Transcript(
@@ -41,7 +41,26 @@ def no_models(monkeypatch):
             for i, (s, e) in enumerate(spans)
         ]
 
-    from maclips import render
+    from maclips import config, render, export
+    monkeypatch.setattr(config,"DB_PATH",tmp_path/"tracking.db")
+    # These orchestration tests isolate downstream services. Their real rules,
+    # persistence and artifact gates are covered by test_compliance/tracking.
+    def fake_compliance(ctx):
+        from maclips.orchestrator import GateFailure
+        if ctx.config.get("stub_compliance_failures"):
+            raise GateFailure("S11","compliance failures block export")
+        return {"passed":True}
+    def fake_post(ctx):
+        from maclips.orchestrator import GateFailure
+        if ctx.output("S0")["clip_class"]=="campaign" and ctx.config.get("post_rows"):
+            raise GateFailure("S14","paid-promotion checkbox")
+        return {"tracked":[]}
+    monkeypatch.setattr(export,"compliance_stage",fake_compliance)
+    monkeypatch.setattr(export,"export_stage",lambda ctx:{"bundles":[]})
+    monkeypatch.setattr(export,"post_stage",fake_post)
+    from maclips import tracking
+    monkeypatch.setattr(tracking,"register_context",lambda ctx:1)
+    monkeypatch.setattr(tracking,"record_preview",lambda *args:None)
     def fake_render(video, audio, candidate, words, layout, out_path, **kwargs):
         return {"path": str(out_path), "planned_duration_s": candidate["end"]-candidate["start"],
                 "actual_duration_s": candidate["end"]-candidate["start"],

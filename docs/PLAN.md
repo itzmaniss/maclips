@@ -699,7 +699,7 @@ a different measure than this one.
 | Speaker attribution, layout planner | **Planned; stub only** | Step 7, the core of §4. |
 | One-pass final renderer | **Built [V]** | Step 5: original split inputs, ASS word highlights, hook, loudnorm; S8 centre/letterbox previews and S12 renderer. Diagnostic CLI exercised; human-approved S12 path pending. |
 | Web UI (Ingest / Review / Posted) | **Planned** | Step 5; brief confirmation currently uses the CLI. |
-| SQLite tracking, export bundles | **Schema built; operational tracking/export pending** | Steps 5 and 8. |
+| SQLite tracking, export bundles | **Built [V]** | Sources/clips/timing written by real CLI. Compliance, bundle and post persistence exercised with fixtures; real posting awaits human actions. |
 
 **Correction after build step 1 [V].** This table originally listed the
 orchestrator and the `whispermlx` transcription stage as *"Reused: your
@@ -1631,6 +1631,22 @@ at -14 LUFS. Final encoding is libx264 CRF 18, preview videotoolbox.
   height or adding padding [V, geometry]. Full height takes priority [I];
   the user should judge the resulting framing in step 6.
 
+**Phase 2 [V].** S11 now checks duration, platform, required tags/hashtags,
+caption disclosure, class/account routing (including no YPP), campaign CTA and
+commentary bans, required phrases, and an explicit hook-overlay prohibition.
+Each violation has a fixture test. Missing campaign disclosure text stops
+export for a human decision; it is not invented. Semantic forbidden topics
+and edits stay a human checklist. The schema limitations in §5.2d remain.
+S13 writes MP4/caption/checklist per platform after persisted approval; S14
+writes post URL/status and refuses campaign submission without a boolean
+paid-promotion attestation. Experiment-only imports cannot export.
+
+The real `render-review` CLI wrote **1 source, 12 clips, source_registered and
+first_preview events** to SQLite. Its 24-preview tracking run took **152.08 s**.
+There are **0 real posts**: no real approval or attestation was performed.
+Bundle creation and post writes were exercised only with fixtures. Decision,
+bundle-open and post-URL events are wired to the UI in Phase 3.
+
 ## 7. Campaign workflow
 
 ### 7.1 Lifecycle
@@ -1715,8 +1731,8 @@ Each step has a "done when". Arrows show what it blocks.
 | 9 | **Conditional: Light-ASD escalation** (§4.5), only if step 7 misses the threshold after heuristic tuning. | Accuracy clears the threshold, or you accept split-screen as the two-shot default. | — |
 
 **Session g status [V]:** step 5 render core built and run on real candidates;
-Review UI, compliance/export and human end-to-end campaign acceptance pending.
-Step 6 remains pending face tracking and user framing judgment; step 8 pending.
+Review UI and human end-to-end campaign acceptance pending. Step 8 mechanical
+checks built and fixture-tested [V]; step 6 awaits face tracking and user judgment.
 
 **Critical path to first earnings:** 1 → 2 → 4 → 5 → 6, with 3 and 8 in parallel.
 

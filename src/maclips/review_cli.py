@@ -22,7 +22,7 @@ def render_review(manifest_path, diagnostic_finals=0):
             raise ValueError('candidate timing does not match the aligned words')
     workdir = manifest_path.parent / data.get('render_dir', 'renders')
     ctx = RunContext('review-materials', audio, hash_file(audio), workdir,
-                     {'clip_class': 'general-own'}, outputs={
+                     {'clip_class': 'general-own', 'experiment_only': True}, outputs={
         'S0': {'clip_class': 'general-own', 'video_path': str(video)},
         'S1': {'applicable': False}, 'S3': {'words': words},
         'S5': {'candidates': candidates}, 'S4': {'imported': True}})
@@ -35,6 +35,8 @@ def render_review(manifest_path, diagnostic_finals=0):
     print(report.render(), flush=True)
     if report.gated:
         return 2
+    from .tracking import import_previews
+    import_previews(ctx)
     finals = []
     for c in candidates[:diagnostic_finals]:
         plans = ctx.output('S7')['plans'][str(c['rank'])]
