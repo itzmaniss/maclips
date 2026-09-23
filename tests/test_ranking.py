@@ -184,37 +184,21 @@ def test_speaker_labels_appear_only_when_asked():
     assert "SPEAKER_00" in ranking.build_transcript(w, with_speakers=True)
 
 
-def test_transcript_lines_carry_the_first_word_index_and_start_time():
-    """10 words at 2.5 words/s: sentences start at 0 s, 4 s and 8 s."""
+def test_transcript_lines_carry_the_first_word_index_and_no_time():
+    """Start times were removed from the lines (§5.1): the index and the words only."""
     lines = ranking.build_transcript(words(30)).splitlines()
-    assert lines[0] == "[0 @ 0:00] " + " ".join(f"w{i}" for i in range(9)) + " w9."
-    assert lines[1].startswith("[10 @ 0:04] w10 ")
-    assert lines[2].startswith("[20 @ 0:08] w20 ")
+    assert lines[0] == "[0] " + " ".join(f"w{i}" for i in range(9)) + " w9."
+    assert lines[1].startswith("[10] w10 ")
+    assert lines[2].startswith("[20] w20 ")
 
 
-def test_labelled_lines_carry_the_time_before_the_speaker():
+def test_labelled_lines_carry_the_speaker_after_the_index():
     w = words(30)
     for x in w:
         x["speaker"] = "SPEAKER_01"
     assert ranking.build_transcript(w, with_speakers=True).splitlines()[1].startswith(
-        "[10 @ 0:04] SPEAKER_01: w10 "
+        "[10] SPEAKER_01: w10 "
     )
-
-
-def test_start_time_is_elapsed_and_rolls_into_hours():
-    w = [{"word": "a.", "start": 59.9, "end": 60.0},
-         {"word": "b.", "start": 725.0, "end": 726.0},
-         {"word": "c.", "start": 3723.4, "end": 3724.0}]
-    assert ranking.build_transcript(w).splitlines() == [
-        "[0 @ 0:59] a.", "[1 @ 12:05] b.", "[2 @ 1:02:03] c.",
-    ]
-
-
-def test_start_time_skips_untimed_words_and_is_omitted_when_none_are_timed():
-    w = [{"word": "x", "start": None, "end": None},
-         {"word": "y.", "start": 5.0, "end": 5.5},
-         {"word": "z.", "start": None, "end": None}]
-    assert ranking.build_transcript(w).splitlines() == ["[0 @ 0:05] x y.", "[2] z."]
 
 
 def test_default_range_is_the_postable_range():
@@ -241,8 +225,8 @@ def test_default_range_keeps_a_150_s_span_that_30_60_dropped():
     assert len(kept) == 1 and dropped["duration"] == 0
 
 
-def test_prompt_explains_the_time_and_still_asks_for_word_indices_only():
-    assert "elapsed time from the start of the source" in ranking.PROMPT
-    assert "end time minus" in ranking.PROMPT
-    assert "must fall in the target range" in ranking.PROMPT
+def test_prompt_describes_index_only_lines_and_asks_for_word_indices_only():
+    assert "begins with the word index of its first word, in square brackets" in ranking.PROMPT
+    assert "@" not in ranking.PROMPT
+    assert "end time minus" not in ranking.PROMPT
     assert "Refer to moments only by word index" in ranking.PROMPT

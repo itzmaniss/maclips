@@ -83,14 +83,9 @@ RANKING_SCHEMA = {
 
 PROMPT = """You are selecting standalone short-form clips from a long transcript.
 
-The transcript below is one line per sentence. Each line begins, in square \
-brackets, with the word index of its first word and the time the sentence \
-starts, as elapsed time from the start of the source (M:SS, or H:MM:SS past \
-the first hour): `[1234 @ 12:03]`. **Refer to moments only by word index.** \
-Never output a timestamp; timestamps are looked up from alignment data. The \
-times are there so you can judge length: a clip's length is its end time minus \
-its start time, where its end time is the start time of the line after its \
-last sentence. That length must fall in the target range below.
+The transcript below is one line per sentence. Each line begins with the word \
+index of its first word, in square brackets. **Refer to moments only by word \
+index.** Never output a timestamp; timestamps are looked up from alignment data.
 
 Return JSON only: {{"candidates": [...]}}, ordered best first. Produce exactly \
 {count} candidates.
@@ -120,49 +115,37 @@ Transcript:
 
 
 def build_transcript(words: Sequence[Any], with_speakers: bool = False) -> str:
-    """One line per sentence, prefixed with the first word's index and the
-    sentence's start time from the alignment data, e.g. `[1234 @ 12:03]`.
+    """One line per sentence, prefixed with the first word's index.
 
-    The time lets the model judge span length; it still answers in word
-    indices only (§2.2 item 3). `with_speakers` prefixes the speaker label too,
-    which is what the step-4 experiment varies. Diarization normally runs
-    *after* ranking (§2.2 item 1), so the labelled form exists only via
-    `--full-diarization`.
+    `with_speakers` prefixes the speaker label too, which is what the step-4
+    experiment varies. Diarization normally runs *after* ranking (§2.2 item 1),
+    so the labelled form exists only via `--full-diarization`.
     """
-    def get(w, key):
-        return getattr(w, key) if hasattr(w, key) else w.get(key)
-
     lines: list[str] = []
-    current: list[Any] = []
-
-    def flush() -> None:
-        # The first word with a measured start; a sentence with none gets no time.
-        start = next((t for t in (get(w, "start") for w in current) if t is not None), None)
-        prefix = f"[{start_idx}" + (f" @ {_elapsed(start)}]" if start is not None else "]")
-        speaker = get(current[0], "speaker")
-        if with_speakers and speaker:
-            prefix += f" {speaker}:"
-        lines.append(f"{prefix} {' '.join(get(w, 'word') for w in current)}")
-
+    current: list[str] = []
     start_idx = 0
+    speaker = None
+
     for i, w in enumerate(words):
+        text = w.word if hasattr(w, "word") else w["word"]
+        spk = w.speaker if hasattr(w, "speaker") else w.get("speaker")
         if not current:
             start_idx = i
-        current.append(w)
-        if SENTENCE_END.search(get(w, "word")):
-            flush()
+            speaker = spk
+        current.append(text)
+        if SENTENCE_END.search(text):
+            prefix = f"[{start_idx}]"
+            if with_speakers and speaker:
+                prefix += f" {speaker}:"
+            lines.append(f"{prefix} {' '.join(current)}")
             current = []
+
     if current:
-        flush()
+        prefix = f"[{start_idx}]"
+        if with_speakers and speaker:
+            prefix += f" {speaker}:"
+        lines.append(f"{prefix} {' '.join(current)}")
     return "\n".join(lines)
-
-
-def _elapsed(seconds: float) -> str:
-    """M:SS, or H:MM:SS past the first hour."""
-    total = int(seconds)
-    h, rest = divmod(total, 3600)
-    m, s = divmod(rest, 60)
-    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
 def sentence_starts(words: Sequence[Any]) -> list[int]:

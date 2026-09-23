@@ -61,8 +61,9 @@ class RunContext:
     Checkpoints are JSON, but S3 and S4 must share the decoded waveform (~450 MB
     of float32 for a 2-hour source) and the live transcript objects. Putting
     them here keeps one copy in memory and keeps the checkpoint files small.
-    A resumed run finds `shared` empty and reloads from the S2 WAV, so nothing
-    depends on it surviving."""
+    A resumed run finds `shared` empty. The waveform is re-decoded from the S2
+    WAV and S5 rebuilds the transcript from S3's checkpointed words; no other
+    entry is reloaded, so nothing else may depend on surviving a resume."""
 
     def output(self, stage_id: str) -> StageOutput:
         """Read an upstream stage's output, failing loudly if it is absent."""

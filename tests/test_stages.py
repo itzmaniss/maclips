@@ -433,3 +433,80 @@ def test_gated_run_resumes_from_the_stage_that_stopped(tmp_path, tiny_av, monkey
     second = run_pipeline(make_ctx(tmp_path, tiny_av, expected_language="en"), STAGES)
     assert second.ok, second.render()
     assert [r.status for r in second.records[:3]] == ["cached", "cached", "cached"]
+
+
+def _sentences(n=200):
+    """n words at 0.4 s each, a sentence every 10 words (4 s)."""
+    return [Word(f"w{i}." if i % 10 == 9 else f"w{i}", i * 0.4, i * 0.4 + 0.3, 0.9)
+            for i in range(n)]
+
+
+def _rank_stub(monkeypatch, prompts):
+    """Stands in for the model: records each prompt, returns 5 valid 12 s spans."""
+    import json
+
+    from maclips import llm
+
+    def fake_rank_fn(prompt, usage_sink=None):
+        prompts.append(prompt)
+        return json.dumps({"candidates": [
+            {"start_word": i * 30, "end_word": i * 30 + 29, "hook_text": "h",
+             "why": "w", "topic": "t", "brief_flags": []} for i in range(5)
+        ]})
+
+    monkeypatch.setattr(llm, "rank_fn", fake_rank_fn)
+
+
+def test_s5_after_a_checkpointed_s3_ranks_the_same_words(tmp_path, tiny_av, monkeypatch):
+    """A resumed run loads S3 from its checkpoint, so `shared` has no transcript;
+    S5 must rebuild it from S3's words rather than gate on its absence."""
+    monkeypatch.setattr(transcribe_mod, "run",
+                        lambda w, model_name=None, language=None, on_stage=None:
+                        Transcript(words=_sentences(), language="en"))
+    prompts: list[str] = []
+    _rank_stub(monkeypatch, prompts)
+    through_s5 = [s for s in STAGES if s.id in ("S0", "S1", "S2", "S3", "S5")]
+
+    live = make_ctx(tmp_path, tiny_av, stub_candidates=None)
+    assert run_pipeline(live, through_s5).ok
+
+    def no_transcribe(*a, **k):
+        raise AssertionError("S3 recomputed; it should load from its checkpoint")
+
+    monkeypatch.setattr(transcribe_mod, "run", no_transcribe)
+    resumed = make_ctx(tmp_path, tiny_av, stub_candidates=None)
+    report = run_pipeline(resumed, through_s5, from_stage="S5")
+    assert report.ok, report.render()
+    assert [r.status for r in report.records] == ["cached"] * 4 + ["ran"]
+    assert resumed.shared["transcript"].words == live.shared["transcript"].words
+    assert prompts[0] == prompts[1]
+    assert resumed.outputs["S5"]["candidates"] == live.outputs["S5"]["candidates"]
+
+
+def test_from_s5_reaches_the_ranking_call(tmp_path, tiny_av, monkeypatch):
+    """`maclips run <source> --from S5` after a finished S3: the model is called."""
+    monkeypatch.setattr(transcribe_mod, "run",
+                        lambda w, model_name=None, language=None, on_stage=None:
+                        Transcript(words=_sentences(), language="en"))
+    prompts: list[str] = []
+    _rank_stub(monkeypatch, prompts)
+    through_s3 = [s for s in STAGES if s.id in ("S0", "S1", "S2", "S3")]
+    assert run_pipeline(make_ctx(tmp_path, tiny_av, stub_candidates=None), through_s3).ok
+    assert prompts == []
+
+    report = run_pipeline(make_ctx(tmp_path, tiny_av, stub_candidates=None), STAGES,
+                          from_stage="S5")
+    s5 = next(r for r in report.records if r.id == "S5")
+    assert s5.status == "ran", report.render()
+    assert len(prompts) == 1
+    assert "[0] w0 w1" in prompts[0]
+
+
+def test_s5_still_gates_when_s3_has_no_words(tmp_path, tiny_av):
+    from maclips.orchestrator import GateFailure
+    from maclips.stages import s5_rank
+
+    ctx = make_ctx(tmp_path, tiny_av, stub_candidates=None)
+    ctx.outputs.update({"S0": {"clip_class": "general-own"}, "S1": {}, "S3": {"words": []}})
+    with pytest.raises(GateFailure, match="no transcript from S3 to rank"):
+        s5_rank(ctx)

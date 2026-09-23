@@ -64,6 +64,23 @@ def _waveform(ctx: RunContext):
     return waveform
 
 
+def _transcript(ctx: RunContext):
+    """S3's transcript: the live object, or rebuilt from S3's checkpointed words
+    when S3 was loaded from its checkpoint (a resumed run, or `--from S5`)."""
+    transcript = ctx.shared.get("transcript")
+    if transcript is None:
+        from .transcribe import Transcript, Word
+
+        s3 = ctx.output("S3")
+        words = s3.get("words")
+        if not words:
+            return None
+        transcript = Transcript(words=[Word(**w) for w in words],
+                                language=s3.get("language", ""))
+        ctx.shared["transcript"] = transcript
+    return transcript
+
+
 # --------------------------------------------------------------------------- #
 # S0-S1  ingest and brief
 # --------------------------------------------------------------------------- #
@@ -323,7 +340,7 @@ def s5_rank(ctx: RunContext) -> StageOutput:
     from . import ranking
     from .llm import rank_fn
 
-    transcript = ctx.shared.get("transcript")
+    transcript = _transcript(ctx)
     if transcript is None:
         raise GateFailure("S5", "no transcript from S3 to rank.")
 

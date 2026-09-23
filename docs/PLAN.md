@@ -867,8 +867,8 @@ If the heuristic misses the threshold on two-shot sources:
 
 ### 5.1 Input
 
-- The full transcript, one line per sentence, prefixed with the first word index and the sentence's start time from the alignment data, as elapsed time from the start of the source: `[1234 @ 12:03]` (`H:MM:SS` past the first hour). The time is there so the model can judge span length (§5.2c); it still answers in word indices only (§2.2 item 3). **Not speaker-labelled**: diarization moved behind ranking in step 2b (§2.2 item 1), so speaker labels do not exist yet at S5. Use `--full-diarization` to produce a labelled transcript for the step-4 comparison.
-- A 2-hour podcast measured **60,906 tokens** unlabelled and **79,725** speaker-labelled with the start times (`count_tokens`, `claude-sonnet-5`, full ranking prompt, §5.2b) [V]. Before the times it was 44,014 and 62,833, and the first estimate was 25–35k. It still fits in one call. No chunking, and no loss of cross-section context.
+- The full transcript, one line per sentence, prefixed with the first word index in square brackets: `[1234]`. The model answers in word indices only (§2.2 item 3). **No start times [decision, user, session 2026-09-23f]:** they were added in session 2026-09-23d to fix span length and removed here (§5.2e). The 10–180 s default had already fixed length, and the times cost 38% more input tokens and are the suspected cause of the malformed first attempts. **Not speaker-labelled**: diarization moved behind ranking in step 2b (§2.2 item 1), so speaker labels do not exist yet at S5. Use `--full-diarization` to produce a labelled transcript for the step-4 comparison.
+- A 2-hour podcast measures **44,014 tokens** unlabelled and **62,833** speaker-labelled (`count_tokens`, `claude-sonnet-5`, full ranking prompt, §5.2b), re-measured after the start times were removed [V]. With the times it was 60,906 and 79,725, and the first estimate was 25–35k. It still fits in one call. No chunking, and no loss of cross-section context.
 
 ### 5.2 Model and cost
 
@@ -883,13 +883,14 @@ If the heuristic misses the threshold on two-shot sources:
   16,000-token cap on the first live call (§5.2c). `rank_fn` sets
   `reasoning_effort="low"` and `max_tokens=32000`, which caps thinking and
   JSON together. Temperature is omitted.
-- **Cost per call: about $0.13 unlabelled, with the start times §5.1 adds
-  [V, 2 calls].** 60,906 input tokens ($0.122) plus about 1,100-1,250 output
-  tokens ($0.011-0.013): $0.1344 and $0.1327 (§5.2c, session 2026-09-23d).
-  Before the times it was $0.10 (44,014 input, 2 calls). The output count
-  includes the thinking tokens, which are billed as output; low effort used
-  0-32 of them. Wall time was 11-16 s. The worst case at the 32,000 cap is
-  $0.44. A retry doubles the cost of a run.
+- **Cost per call: about $0.10 unlabelled, now the start times are gone
+  (§5.1) [V, 2 calls, session 2026-09-23c].** 44,014 input tokens ($0.088)
+  plus about 1,250 output tokens ($0.0125): $0.1006 and $0.1005. With the
+  times it was $0.13 (60,906 input; §5.2c, sessions 2026-09-23d and e). The
+  output count includes the thinking tokens, which are billed as output; low
+  effort used 0-32 of them. Wall time was 11-16 s. The worst case at the
+  32,000 cap is $0.41. A retry doubles the cost of a run. Session 2026-09-23f's
+  calls on this prompt are in §5.2e.
 - **Tokenizer.** The current-generation tokenizer uses more tokens per
   character than older estimates assumed: the `chars / 4` estimate was 1.47x
   too low on the benchmark transcript (§5.2b) [V]. Budget from
@@ -941,6 +942,12 @@ That is about 8 tokens per line over 2,095 lines, including the prompt's
 added explanation. It costs **+$0.034 input per call** at $2/MTok. Timestamps
 tokenize densely: 19,066 more characters cost 16,892 tokens, about 1.1
 characters per token.
+
+**Start times removed, session 2026-09-23f [V].** After the revert
+(§5.2e), the same measurement gives **44,014** unlabelled and **62,833**
+labelled again, identical to the counts before the times. The unlabelled
+prompt is 119,784 characters, one more than the 119,783 above, because the
+default-range line now reads "10-180" instead of "30-60".
 
 **Cost is a single number since 2026-09-23 [V].** The rate is settled at
 $2/$10 (§5.2). The range reporting this paragraph described has been removed.
@@ -1109,6 +1116,12 @@ diarization timing yet. Raw outputs are in `work/session-20260923c/raw/`
 (gitignored). Not changed here: the prompt, the snapping direction and the
 duration filter. Which of them to change is a decision.
 
+**Session 2026-09-23c spend: $0.2012 recorded, $0.64 worst case [V/U].**
+The script was killed just after the spend guard printed B1's projection, so the B1 request may
+already have been sent. If it was, it is not in the ledger. It would cost
+about $0.13 if it matched A1 and A2, and at most $0.436 at the 32,000 cap.
+That puts the worst-case session total at $0.64, against a $3.00 cap.
+
 `scripts/ranking_experiment.py` did not stop on `insufficient`. (It printed
 the drops but did not record the flag.) It continued to the next run, to
 diarization and to the blind sheet, so a gated run could still reach the
@@ -1118,7 +1131,7 @@ exits with code 2 before any further call. This was checked offline with a
 stubbed `rank_fn`: one call, then the exit.
 
 **Clip-length fix chosen [decision, user]: option 1, give the model elapsed
-time.** Each transcript line now carries its sentence's start time (§5.1).
+time.** (Removed again in session 2026-09-23f, §5.2e.) Each transcript line now carries its sentence's start time (§5.1).
 The prompt says what the time is, that a clip's length is its end time minus
 its start time, and that the length must fall in the target range. Output is
 still word indices only, never a timestamp. The snapping direction and the
@@ -1199,12 +1212,6 @@ session 2026-09-23c retry (§2.6c) used a scratch driver that sets
 `cli.STAGES` to the committed stages before S5. This is recorded as a
 finding only; no option was added.
 
-**Spend: $0.2012 recorded, $0.64 worst case [V/U].** The script was killed
-just after the spend guard printed B1's projection, so the B1 request may
-already have been sent. If it was, it is not in the ledger. It would cost
-about $0.13 if it matched A1 and A2, and at most $0.436 at the 32,000 cap.
-That puts the worst-case session total at $0.64, against a $3.00 cap.
-
 **Session 2026-09-23e: at 10–180 s, A1 and A2 kept 12/12; B1 stopped at the
 malformed-JSON gate [V].** The default range is now 10–180 s (§6.1). The
 prompt, effort (`low`) and model are unchanged. Condition C (Haiku) was
@@ -1258,7 +1265,28 @@ does the same. `orchestrator.RunContext.shared`'s docstring says "A resumed
 run finds `shared` empty and reloads from the S2 WAV, so nothing depends on
 it surviving". That holds for the waveform, but not for the transcript. The
 S3 checkpoint holds the words (`S3.json` `output.words`), but nothing reads
-them back. Not fixed here.
+them back. Not fixed here. **Fixed in session 2026-09-23f (§5.2e).**
+
+### 5.2e Session 2026-09-23f: start times removed, S5 resume fixed, experiment rerun [V]
+
+**Start times removed [decision, user].** `build_transcript` and the
+`PROMPT` paragraph that describes the lines are back to their text before
+`99e8e2a`: lines read `[1234] words…` (`[1234] SPEAKER_00: words…`
+labelled), and the prompt says "Each line begins with the word index of its
+first word, in square brackets." Everything else added since is kept: the
+10–180 s default, the experiment script's survivor-gate stop, and the rest of
+the prompt. Tokens: 44,014 unlabelled and 62,833 labelled (§5.2b).
+
+**S5 resumes from a cached S3 [V, tests].** When `ctx.shared` has no
+transcript, S5 now rebuilds it from S3's checkpointed `words`
+(`stages._transcript`, alongside `_waveform`) and stores it in `shared`, so S4
+also assigns window speakers to it. S5 still gates on "no transcript from S3
+to rank." when S3's output has no words. `RunContext.shared`'s docstring no
+longer claims nothing depends on it. Tests in `tests/test_stages.py`, with a
+stubbed `rank_fn` and no network: S5 after a checkpointed S3 sees the same
+words, builds the same prompt and returns the same candidates as after a live
+S3, with S3 not recomputed. A run with `from_stage="S5"` after an S0–S3 run
+reaches the ranking call. Both tests fail on the previous code.
 
 ### 5.2d Brief extraction fix, 2026-09-23 [V]
 
