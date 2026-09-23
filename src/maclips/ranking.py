@@ -19,8 +19,11 @@ from typing import Any
 SENTENCE_END = re.compile(r"[.!?]['\"’”)]*$")
 
 MIN_SURVIVING_CANDIDATES = 5
-DEFAULT_MIN_DURATION_S = 30.0
-DEFAULT_MAX_DURATION_S = 60.0
+# Used only when the brief states no range. Any clip postable on Reels, TikTok
+# and Shorts is fine (user rule): 180 s is the smallest platform maximum
+# (Shorts), 10 s the floor four captured briefs state (§6.1).
+DEFAULT_MIN_DURATION_S = 10.0
+DEFAULT_MAX_DURATION_S = 180.0
 
 
 class RankingError(RuntimeError):

@@ -114,6 +114,26 @@ def test_cache_hit_requires_both_streams(tmp_path):
     assert ingest.cached_streams("abc123", tmp_path) is not None
 
 
+@pytest.mark.parametrize("leftover", [
+    "abc123.video.mp4.part", "abc123.video.mp4.ytdl", "abc123.video.temp.mp4",
+    "abc123.video.mp4.part-Frag3",
+])
+def test_cache_hit_ignores_yt_dlp_resume_and_temp_files(tmp_path, leftover):
+    """§2.5: a resume file is not a stream, so audio plus a leftover is a miss."""
+    (tmp_path / "abc123.audio.m4a").write_bytes(b"a")
+    (tmp_path / leftover).write_bytes(b"partial")
+    assert ingest.cached_streams("abc123", tmp_path) is None
+
+
+def test_cache_hit_returns_the_complete_stream_beside_a_leftover(tmp_path):
+    (tmp_path / "abc123.audio.m4a").write_bytes(b"a")
+    (tmp_path / "abc123.audio.m4a.part").write_bytes(b"partial")
+    (tmp_path / "abc123.video.mp4.ytdl").write_bytes(b"state")
+    (tmp_path / "abc123.video.mp4").write_bytes(b"v")
+    audio, video = ingest.cached_streams("abc123", tmp_path)
+    assert (audio.name, video.name) == ("abc123.audio.m4a", "abc123.video.mp4")
+
+
 def test_local_file_needs_no_split_and_never_waits(tmp_path, tiny_av):
     record = ingest.resolve(str(tiny_av), tmp_path)
     assert record.audio_path is None

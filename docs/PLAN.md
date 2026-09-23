@@ -370,7 +370,12 @@ first stage that needs pixels. S2-S5 must never call it.
 **Caching.** The YouTube video id is the key and names both files, so
 re-ingesting the same URL is a cache hit and no bytes are fetched. **Both**
 streams must be present to count as a hit — audio alone would let S6 start on a
-video that never arrived. Title, channel, duration, upload date and the origin
+video that never arrived. **yt-dlp's resume and temporary files never count
+[V, tests]** (session 2026-09-23e): `cached_streams` skips any file with a
+`.part`, `.part-FragN`, `.ytdl` or `.temp` component, so audio plus a leftover
+`<id>.video.mp4.part` is a miss and the video is downloaded again. Before the
+fix, the `<id>.video.*` glob returned `BcrjhdSUv4Y.video.mp4.ytdl` as the
+cached video (§2.6c). Title, channel, duration, upload date and the origin
 URL go into the source record.
 
 **Gate.** A download failure stops the run and the message suggests
@@ -576,10 +581,10 @@ source. It gates if the download failed or is still running at `video_wait_s`.
 It also gates if the file is a yt-dlp `.part`/`.ytdl` resume file, or if it
 probes without a video stream. The resume-file case is real:
 `ingest.cached_streams` globs `<id>.video.*`, and with the leftover files
-above it returned `BcrjhdSUv4Y.video.mp4.ytdl` as the cached video. **That
-glob is still in `ingest.py`, which this session did not change.** S6 now
-catches its effect, but a re-run with leftovers is a false cache hit and
-never downloads the video. The leftover `.part` (16.6 MB) and `.ytdl` were
+above it returned `BcrjhdSUv4Y.video.mp4.ytdl` as the cached video. That
+glob was left in `ingest.py` that session; a re-run with leftovers was a false
+cache hit and never downloaded the video. **Fixed in session 2026-09-23e**
+(§2.5). The leftover `.part` (16.6 MB) and `.ytdl` were
 moved, not deleted, to `work/session-20260923d/prior-sources/` along with the
 old audio. The real run then downloaded both streams fresh (§2.6d). Seven
 tests cover this in `tests/test_stages.py`; six of them fail on the old code.
@@ -878,12 +883,13 @@ If the heuristic misses the threshold on two-shot sources:
   16,000-token cap on the first live call (§5.2c). `rank_fn` sets
   `reasoning_effort="low"` and `max_tokens=32000`, which caps thinking and
   JSON together. Temperature is omitted.
-- **Cost per source: $0.10 unlabelled, measured on 2 calls [V].** 44,014
-  input tokens ($0.088) plus about 1,250 output tokens ($0.0125). The output
-  count includes the thinking tokens, which are billed as output; low effort
-  used only 21-32 of them. Wall time was 14-16 s. The worst case at the
-  32,000 cap is $0.41. Both calls hit the survivor gate, so this is the cost
-  of a call, not yet of a usable candidate list (§5.2c).
+- **Cost per call: about $0.13 unlabelled, with the start times §5.1 adds
+  [V, 2 calls].** 60,906 input tokens ($0.122) plus about 1,100-1,250 output
+  tokens ($0.011-0.013): $0.1344 and $0.1327 (§5.2c, session 2026-09-23d).
+  Before the times it was $0.10 (44,014 input, 2 calls). The output count
+  includes the thinking tokens, which are billed as output; low effort used
+  0-32 of them. Wall time was 11-16 s. The worst case at the 32,000 cap is
+  $0.44. A retry doubles the cost of a run.
 - **Tokenizer.** The current-generation tokenizer uses more tokens per
   character than older estimates assumed: the `chars / 4` estimate was 1.47x
   too low on the benchmark transcript (§5.2b) [V]. Budget from
@@ -1356,9 +1362,36 @@ A local web app served from the Mac: a Python backend in the same process as the
 - **Campaign:** pick an existing one, or create one by pasting the brief. The extracted config form appears; you edit and confirm. This is S1.
 - **Run arguments:**
   - candidate count (default 12);
-  - length range (default from brief, else 30–60 s);
+  - length range (default from brief, else **10–180 s**; see below);
   - expected speaker count (optional; enables the S4 gate);
   - default commentary mode (per class, overridable).
+- **Default length range when the brief states none: 10–180 s [decision,
+  user; limits V 2026-09-23].** The user's rule: any clip postable on
+  Instagram Reels, TikTok and YouTube Shorts is fine. The maximum is the
+  smallest of the three platform maxima; the minimum is the lead's floor, not
+  a platform limit: 10 s is the minimum that 4 of the 8 captured briefs state
+  (§5.2d). A brief's own `min_duration_s`/`max_duration_s` still override it.
+  `ranking.DEFAULT_MIN_DURATION_S`/`DEFAULT_MAX_DURATION_S` carry it; the
+  prompt's word guidance follows at 2.5 words/s (25–450 words). Platform
+  pages, fetched 2026-09-23:
+  - **YouTube Shorts: 3 min**, which is binding.
+    [support.google.com/youtube/answer/15424877](https://support.google.com/youtube/answer/15424877?hl=en):
+    "You can now create YouTube Shorts up to three minutes in length", and
+    "videos … with a square or vertical aspect ratio up to three minutes in
+    length will be categorized as Shorts".
+  - **Instagram Reels: 20 min, but only 3 min is recommended.**
+    [about.instagram.com/features/reels](https://about.instagram.com/features/reels)
+    and the Help Centre
+    ([facebook.com/help/instagram/2720958398006062](https://www.facebook.com/help/instagram/2720958398006062)):
+    "You can record one or multiple clips that add up to 20 minutes", and
+    "Reels over 3 minutes won't be recommended to new audiences". A clip
+    over 3 min is postable but gets no reach to new viewers, which defeats
+    campaign clipping [I]. So Reels also binds at 180 s.
+  - **TikTok: 60 min uploaded** (10 min recorded in the app).
+    [tiktok.com/support/faq_detail?id=7581821547946580492](https://www.tiktok.com/support/faq_detail?id=7581821547946580492)
+    (the "Camera tools" page, rendered in a browser): "Videos you record in
+    TikTok can be up to 10 minutes long. Videos you upload in TikTok can be
+    up to 60 minutes long." Not binding.
 - **Progress:** a per-stage status line (running / cached / passed / **gated**, with the gate's reason). A gated run shows exactly which stage stopped and why, with a re-run-from-stage button. Cached stages don't recompute.
 
 ### 6.2 Review tab
@@ -1439,7 +1472,9 @@ Whop's brand-side form has a free-text Requirements field covering quality stand
 - `brand` (req), `campaign_name` (req), `category`. Crypto or gambling → rejected at S1.
 - `rate_per_1k` (only when one rate covers every platform), `rate_per_1k_by_platform`, `pool_total`, `pool_used` (dollars, as stated), `pool_used_pct_at_join` (derived from the two, corrected at confirm), `deadline`. These are the **business-gate fields** (§1.5): each must hold a value or be marked unknown by you at confirm (`unknown <field>`), recorded in `unknown_confirmed`. S1 refuses a confirmed brief that has neither.
 - `platforms_allowed` (req).
-- `min_duration_s`, `max_duration_s`.
+- `min_duration_s`, `max_duration_s`. When the brief states neither, S5 uses
+  10–180 s, the range postable on all three platforms (§6.1). Each field
+  overrides its own end of the range.
 - `required_tags` (accounts to tag), `required_hashtags`, `required_phrases`.
 - `disclosure_text` (default: the paid-promotion tag you settled on).
 - `forbidden_topics`, `forbidden_edits` (e.g. "no text over face", "no added music").

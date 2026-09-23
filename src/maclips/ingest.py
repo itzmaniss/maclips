@@ -28,6 +28,10 @@ DEFAULT_MAX_HEIGHT = 1440
 
 URL_PATTERN = re.compile(r"^[a-z][a-z0-9+.-]*://", re.I)
 
+# yt-dlp's in-progress files: `.part` (and `.part-FragN`), the `.ytdl` resume
+# state, and `.temp` from its post-processors. None of them is a whole stream.
+INCOMPLETE_SUFFIXES = (".part", ".ytdl", ".temp")
+
 
 class IngestError(RuntimeError):
     """Ingest failed. Carries a remedy, because the usual cause is a stale yt-dlp."""
@@ -348,9 +352,21 @@ def cached_streams(video_id: str, dest_dir: Path) -> tuple[Path, Path] | None:
 
     Requires *both*: an audio file without its video would let S6 start on a
     source whose pixels never arrived.
+
+    yt-dlp's resume and temporary files (`.part`, `.ytdl`, `.temp`, ...) match
+    the same glob but are not complete streams, so they never count.
     """
-    audio = [p for p in dest_dir.glob(f"{video_id}.audio.*") if p.is_file()]
-    video = [p for p in dest_dir.glob(f"{video_id}.video.*") if p.is_file()]
+    def complete(tag: str) -> list[Path]:
+        return [p for p in sorted(dest_dir.glob(f"{video_id}.{tag}.*"))
+                if p.is_file() and not _incomplete(p)]
+
+    audio, video = complete("audio"), complete("video")
     if audio and video:
         return audio[0], video[0]
     return None
+
+
+def _incomplete(path: Path) -> bool:
+    """Any `.part`/`.ytdl`/`.temp` component, wherever yt-dlp put it."""
+    return any(sfx in INCOMPLETE_SUFFIXES or sfx.startswith(".part-")
+               for sfx in path.suffixes)

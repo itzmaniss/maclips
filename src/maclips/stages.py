@@ -516,7 +516,8 @@ STAGES: tuple[StageSpec, ...] = (
               needs=("S2",),
               params=("expected_language", "whisper_model", "min_alignment_score",
                       "max_weak_word_fraction"),
-              gate="Weakly-aligned words above 5%; language != expected"),
+              gate=f"Weakly-aligned words above {MAX_WEAK_WORD_FRACTION:.0%}; "
+                   "language != expected"),
     # S5 before S4: diarization is window-only and needs the candidate spans.
     StageSpec("S5", "rank", "Sonnet ranks candidates", s5_rank,
               needs=("S1", "S3"),

@@ -217,6 +217,30 @@ def test_start_time_skips_untimed_words_and_is_omitted_when_none_are_timed():
     assert ranking.build_transcript(w).splitlines() == ["[0 @ 0:05] x y.", "[2] z."]
 
 
+def test_default_range_is_the_postable_range():
+    """No brief range: 10-180 s (§6.1). 180 s is the Shorts maximum, the
+    smallest of the three platforms'; 10 s is the minimum four briefs state."""
+    assert (ranking.DEFAULT_MIN_DURATION_S, ranking.DEFAULT_MAX_DURATION_S) == (10.0, 180.0)
+
+
+def test_default_range_reaches_the_prompt_with_its_word_guidance():
+    seen: list[str] = []
+
+    def llm(prompt: str) -> str:
+        seen.append(prompt)
+        return '{"candidates": []}'
+
+    with pytest.raises(ranking.RankingError):
+        ranking.rank(words(30), llm)
+    assert "Target 10-180 seconds. Roughly 25-450 words" in seen[0]
+
+
+def test_default_range_keeps_a_150_s_span_that_30_60_dropped():
+    w = words(400)  # 2.5 words/s, so 375 words = 150 s
+    kept, dropped = ranking.post_process([Candidate(1, 0, 374)], w)
+    assert len(kept) == 1 and dropped["duration"] == 0
+
+
 def test_prompt_explains_the_time_and_still_asks_for_word_indices_only():
     assert "elapsed time from the start of the source" in ranking.PROMPT
     assert "end time minus" in ranking.PROMPT

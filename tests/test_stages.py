@@ -103,6 +103,14 @@ def test_every_declared_gate_is_documented():
     assert gateless == {"S2", "S8", "S13"}
 
 
+def test_s3_gate_text_states_the_real_threshold():
+    """The declared gate is read from the constant, not retyped (§2.7: 12%)."""
+    from maclips.stages import MAX_WEAK_WORD_FRACTION, STAGES_BY_ID
+
+    assert MAX_WEAK_WORD_FRACTION == 0.12
+    assert "above 12%" in STAGES_BY_ID["S3"].gate
+
+
 # --------------------------------------------------------------------------- #
 # S0 gates on real probe data
 # --------------------------------------------------------------------------- #
