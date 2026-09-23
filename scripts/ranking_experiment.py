@@ -50,6 +50,11 @@ def one_run(label: str, condition: str, words: list[dict]) -> Run:
     print(f"-> {label} ({condition}): {len(candidates)} candidates in {m.wall_s:.1f}s | "
           f"in={tokens[0]} out={tokens[1]} reasoning={reasoning} | cost ${cost:.3f} | "
           f"attempts={meta['attempts']} dropped={meta['dropped']}", flush=True)
+    if meta.get("insufficient"):
+        # The S5 five-survivor gate (§5.4 item 5): stop before any further call.
+        print(f"STOPPED: {label} kept {len(candidates)}, fewer than "
+              f"{ranking.MIN_SURVIVING_CANDIDATES}; no further runs.", file=sys.stderr)
+        raise SystemExit(2)
     return Run(label=label, condition=condition,
                candidates=[c.as_dict() for c in candidates], usage=usage)
 

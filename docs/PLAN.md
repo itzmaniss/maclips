@@ -862,8 +862,8 @@ If the heuristic misses the threshold on two-shot sources:
 
 ### 5.1 Input
 
-- The full transcript, one line per sentence, prefixed with the first word index. **Not speaker-labelled**: diarization moved behind ranking in step 2b (§2.2 item 1), so speaker labels do not exist yet at S5. Use `--full-diarization` to produce a labelled transcript for the step-4 comparison.
-- A 2-hour podcast measured **44,014 tokens** unlabelled and **62,833** speaker-labelled (`count_tokens`, `claude-sonnet-5`, full ranking prompt, §5.2b) [V] — not the 25–35k first estimated. It still fits in one call. No chunking, and no loss of cross-section context.
+- The full transcript, one line per sentence, prefixed with the first word index and the sentence's start time from the alignment data, as elapsed time from the start of the source: `[1234 @ 12:03]` (`H:MM:SS` past the first hour). The time is there so the model can judge span length (§5.2c); it still answers in word indices only (§2.2 item 3). **Not speaker-labelled**: diarization moved behind ranking in step 2b (§2.2 item 1), so speaker labels do not exist yet at S5. Use `--full-diarization` to produce a labelled transcript for the step-4 comparison.
+- A 2-hour podcast measured **60,906 tokens** unlabelled and **79,725** speaker-labelled with the start times (`count_tokens`, `claude-sonnet-5`, full ranking prompt, §5.2b) [V]. Before the times it was 44,014 and 62,833, and the first estimate was 25–35k. It still fits in one call. No chunking, and no loss of cross-section context.
 
 ### 5.2 Model and cost
 
@@ -921,6 +921,20 @@ including instructions). The count is identical with and without
 
 **Speaker labels add 21.2% more characters but 42.8% more tokens [V]**
 (+18,819 tokens, about +$0.038 input per source at $2/MTok).
+
+**Start times on each line, session 2026-09-23d [V].** Measured the same
+way on the same transcript after `build_transcript` added `@ M:SS` to every
+line and `PROMPT` explained it:
+
+| form | characters | tokens before | tokens with times | overhead |
+|---|---|---|---|---|
+| unlabelled | 138,849 | 44,014 | **60,906** | +16,892 (+38.4%) |
+| speaker-labelled | 163,941 | 62,833 | **79,725** | +16,892 (+26.9%) |
+
+That is about 8 tokens per line over 2,095 lines, including the prompt's
+added explanation. It costs **+$0.034 input per call** at $2/MTok. Timestamps
+tokenize densely: 19,066 more characters cost 16,892 tokens, about 1.1
+characters per token.
 
 **Cost is a single number since 2026-09-23 [V].** The rate is settled at
 $2/$10 (§5.2). The range reporting this paragraph described has been removed.
@@ -1089,9 +1103,20 @@ diarization timing yet. Raw outputs are in `work/session-20260923c/raw/`
 (gitignored). Not changed here: the prompt, the snapping direction and the
 duration filter. Which of them to change is a decision.
 
-`scripts/ranking_experiment.py` records `insufficient` but does not stop on
-it. It continues to the next run, to diarization and to the blind sheet, so a
-gated run can still reach the blind sheet. It was stopped by hand this time.
+`scripts/ranking_experiment.py` did not stop on `insufficient`. (It printed
+the drops but did not record the flag.) It continued to the next run, to
+diarization and to the blind sheet, so a gated run could still reach the
+blind sheet. It was stopped by hand this time. **Fixed in session
+2026-09-23d:** a run with fewer than 5 survivors now prints `STOPPED` and
+exits with code 2 before any further call. This was checked offline with a
+stubbed `rank_fn`: one call, then the exit.
+
+**Clip-length fix chosen [decision, user]: option 1, give the model elapsed
+time.** Each transcript line now carries its sentence's start time (§5.1).
+The prompt says what the time is, that a clip's length is its end time minus
+its start time, and that the length must fall in the target range. Output is
+still word indices only, never a timestamp. The snapping direction and the
+duration filter are unchanged.
 
 **The CLI has no stop-before-stage option [V].** `maclips run` has `--from`
 but no `--to`/`--until`, and `orchestrator.run_pipeline` stops only at a
@@ -1183,6 +1208,10 @@ hashtags, required sounds, source allowlists, and account, audience, payout
 and retention requirements (§5.2c).
 
 ### 5.3 Prompt contract
+
+Input lines carry the word index and the sentence's start time (§5.1). The
+time is for judging length only; the output contract below has no time
+field, and the prompt forbids outputting one.
 
 The prompt asks for JSON only. **JSON is enforced client-side only [V]:**
 `rank_fn` passes `response_format={"type": "json_object"}`, but LiteLLM
