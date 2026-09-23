@@ -1118,6 +1118,42 @@ its start time, and that the length must fall in the target range. Output is
 still word indices only, never a timestamp. The snapping direction and the
 duration filter are unchanged.
 
+**Session 2026-09-23d: with start times, A1 kept 1 of 12, and the session
+stopped at the gate [V].** The benchmark source was run through
+`scripts/ranking_experiment.py` under a spend guard. A1 used both attempts:
+
+| call | input | output | reasoning | finish | wall | cost | result |
+|---|---|---|---|---|---|---|---|
+| A1 attempt 1 | 60,906 | 1,256 | 0 | stop | 15.6 s | $0.1344 | **malformed JSON** |
+| A1 attempt 2 (retry) | 60,977 | 1,079 | 0 | stop | 11.5 s | $0.1327 | **1 / 12 survived** |
+
+- *Attempt 1 was malformed:* `{"candidates": [[{...}]]}` (a nested list),
+  then the text "Wait, I need to output proper format. Let me redo.", then a
+  second full JSON object. The parser rejects the extra data, which is
+  correct, and the one retry ran. This is the first malformed first attempt
+  seen on this prompt. Previous calls were 2/2 valid. With 0 reasoning
+  tokens, the model corrected itself in visible output [I].
+- *The retry kept 1 of 12.* All 11 drops were duration drops, with no
+  overlap and no out-of-range drops. **Before snapping, 10 of 12 spans were
+  already over 60 s:** median 73.1 s, maximum 147.2 s, 148-441 words. One
+  was under 30 s (26.2 s, 29.2 s after snapping). The model's spans still
+  ignore both the time range and the word guidance ("roughly 75-150 words",
+  which matches this speaker's measured 2.5 words/s). Attempt 1's
+  self-corrected second block, which was not scored, looks the same: 9 of 12
+  over 60 s. The previous session, without times, had 6/12 and 8/12 over 60 s
+  before snapping.
+- *Reading, [I], one run:* elapsed time in the transcript did not change the
+  length of the spans. At low effort the model reported 0 thinking tokens,
+  so nothing suggests it computed any length. This is one call, so it cannot
+  show that times make things worse.
+- **Stopped there, per the session's rule.** A2, B1, B2, the real-window
+  diarization, the blind sheet and the second source's S5 did not run.
+  `work/experiment/` is still empty. No further prompt change was made.
+- **Cost with times: $0.13 a call** (60.9k input), up from $0.10. A gated
+  run with a retry costs $0.27. Session spend: **$0.27** ($0.267116) against
+  a $3.00 cap. Raw outputs and the ledger are in
+  `work/session-20260923d/` (gitignored).
+
 **The CLI has no stop-before-stage option [V].** `maclips run` has `--from`
 but no `--to`/`--until`, and `orchestrator.run_pipeline` stops only at a
 gate. So an S0-S3-only run (no API call) is impossible from the CLI. The
