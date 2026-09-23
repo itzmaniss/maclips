@@ -543,9 +543,24 @@ succeeded with the same pinned yt-dlp 2026.08.19, yt-dlp-ejs 0.8.0 and Deno
 2.9.7. yt-dlp logs a GVS PO-token binding experiment and SABR-forced web
 formats for this video. [I] The likely cause is an intermittent 403 on a
 format URL from a client that needs a PO token, not a stale extractor.
-Nothing was upgraded and the gate was not loosened. S0-S3 timings, the
-weak-word fraction and the S3 gate outcome for this source are still
-unmeasured.
+Nothing was upgraded and the gate was not loosened.
+
+**The approved retry downloaded the audio and then stopped at the S0
+video-stream gate [V].** The retry ran through the committed CLI code with
+the stage list cut before S5 (see below). The audio (32.6 MB) landed after
+7.4 s, so the first attempt's 403 was intermittent. S0 then stopped with
+"source has no video stream". **The cause is a bug in the committed code,
+not in the source.** For a URL, `cli._cmd_run` sets `ctx.source =
+record.audio_source`, which is the audio-only `.m4a`. `s0_ingest` ffprobes
+`ctx.source` and requires a video stream. So on the split-stream path
+(§2.5), **`maclips run <url>` stops at S0 for every URL.** The §2.6b
+benchmark never hit this because `scripts/benchmark_step2b.py` calls
+`download_split` and the S2/S3 functions directly, bypassing `s0_ingest`. No
+test covers S0 with a split URL source. The process exit also stopped the
+background video download: `BcrjhdSUv4Y.video.mp4.part` (16.6 MB) remains in
+`work/sources/`. Not fixed here: the fix is a separate decision. S2/S3
+timings, the weak-word fraction and the S3 gate outcome for this source are
+still unmeasured.
 
 ### 2.7 The S3 alignment gate, set from data [V]
 
@@ -1027,6 +1042,19 @@ duration filter. Which of them to change is a decision.
 `scripts/ranking_experiment.py` records `insufficient` but does not stop on
 it. It continues to the next run, to diarization and to the blind sheet, so a
 gated run can still reach the blind sheet. It was stopped by hand this time.
+
+**The CLI has no stop-before-stage option [V].** `maclips run` has `--from`
+but no `--to`/`--until`, and `orchestrator.run_pipeline` stops only at a
+gate. So an S0-S3-only run (no API call) is impossible from the CLI. The
+session 2026-09-23c retry (§2.6c) used a scratch driver that sets
+`cli.STAGES` to the committed stages before S5. This is recorded as a
+finding only; no option was added.
+
+**Spend: $0.2012 recorded, $0.64 worst case [V/U].** The script was killed
+just after the spend guard printed B1's projection, so the B1 request may
+already have been sent. If it was, it is not in the ledger. It would cost
+about $0.13 if it matched A1 and A2, and at most $0.436 at the 32,000 cap.
+That puts the worst-case session total at $0.64, against a $3.00 cap.
 
 ### 5.2d Brief extraction fix, 2026-09-23 [V]
 
