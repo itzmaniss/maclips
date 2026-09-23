@@ -697,7 +697,7 @@ a different measure than this one.
 | Brief extraction, schema, confirm form | **Built** | — |
 | Vision face tracking (pyobjc → Apple Vision) | **Planned; stub only** | Step 6. |
 | Speaker attribution, layout planner | **Planned; stub only** | Step 7, the core of §4. |
-| One-pass final renderer | **Planned; stub only** | Step 5, ffmpeg `filter_complex`. |
+| One-pass final renderer | **Built [V]** | Step 5: original split inputs, ASS word highlights, hook, loudnorm; S8 centre/letterbox previews and S12 renderer. Diagnostic CLI exercised; human-approved S12 path pending. |
 | Web UI (Ingest / Review / Posted) | **Planned** | Step 5; brief confirmation currently uses the CLI. |
 | SQLite tracking, export bundles | **Schema built; operational tracking/export pending** | Steps 5 and 8. |
 
@@ -1604,6 +1604,33 @@ This gives three numbers per source:
 
 ---
 
+### 6.5 Render measurements, session 2026-09-23g [V]
+
+Phase 1 builds the S8/S12 renderer, not the Review UI or compliance yet.
+`maclips render-review work/session-20260923g/benchmark-manifest.json
+--diagnostic-finals 2` imports verified word-index candidates, runs the media
+handoff and static layout planner, then S8. It does not claim to rerun S0–S5.
+Both original audio/video files are separate ffmpeg inputs; captions and hook
+are ASS/libass with the installed Helvetica font, and audio uses loudnorm
+at -14 LUFS. Final encoding is libx264 CRF 18, preview videotoolbox.
+
+- 12 benchmark candidates × centre/letterbox = **24 previews**, **144.66 s**
+  total S8 wall time (540×960, audio present). Below the approximately six
+  minutes allocated to preview rendering on this source.
+- Two finals: planned **84.147 / 85.313 s**, ffprobe **84.200 / 85.400 s**,
+  both **1080×1920 with audio**, wall **19.742 / 19.675 s**.
+- Diagnostic finals carry **UNAPPROVED TEST RENDER**, do not set an approval,
+  and are not exported. The real S9→S12 approval path has not been exercised.
+- Output probing stops on >0.1 s duration drift, wrong dimensions, or no
+  audio; each rule has a test. Failed temporary outputs are not published.
+- Evidence: `work/session-20260923g/benchmark-renders/`, `render-cli.log`,
+  and `preview-check.png`. A sampled centre preview visibly crops part of
+  the face: expected limitation of centre crop, not a face-tracking result.
+- Full-height face crops fix vertical origin at zero. Positioning an
+  arbitrary face one-third down is incompatible without changing the crop
+  height or adding padding [V, geometry]. Full height takes priority [I];
+  the user should judge the resulting framing in step 6.
+
 ## 7. Campaign workflow
 
 ### 7.1 Lifecycle
@@ -1686,6 +1713,10 @@ Each step has a "done when". Arrows show what it blocks.
 | 7 | **Eval set + S7 attribution + follow-crop**, only if G1 passes. Labelling mode, attribution, layout planner, confidence gate calibrated per §4.6, plus the cut-vs-pan test (§4.4). | Measured accuracy on the labelled set, the gate threshold set, and the transition style chosen. | 9 (conditional) |
 | 8 | **S11 full compliance checks + class/account routing.** Build alongside step 5; don't defer it. | Gates provably block each violation type (one test clip per rule). | — |
 | 9 | **Conditional: Light-ASD escalation** (§4.5), only if step 7 misses the threshold after heuristic tuning. | Accuracy clears the threshold, or you accept split-screen as the two-shot default. | — |
+
+**Session g status [V]:** step 5 render core built and run on real candidates;
+Review UI, compliance/export and human end-to-end campaign acceptance pending.
+Step 6 remains pending face tracking and user framing judgment; step 8 pending.
 
 **Critical path to first earnings:** 1 → 2 → 4 → 5 → 6, with 3 and 8 in parallel.
 

@@ -388,7 +388,21 @@ def main() -> int:
                           "Slow (9m per 2h, measured) and not the default; kept for "
                           "the step-4 ranking comparison and cross-source speaker identity")
 
+    review = sub.add_parser("render-review", help="render imported candidates without approval or export")
+    review.add_argument("manifest", help="JSON containing original video/audio, transcript and candidates")
+    review.add_argument("--diagnostic-finals", type=int, default=0,
+                        help="number of watermarked unapproved final-resolution test renders")
+
     args = parser.parse_args()
+    if args.command == "render-review":
+        from .review_cli import render_review
+        from .orchestrator import GateFailure
+        try:
+            check_environment()
+            return render_review(args.manifest, args.diagnostic_finals)
+        except (ValueError, OSError, GateFailure) as exc:
+            print(f"FAILED: {exc}", file=sys.stderr)
+            return 2
     if args.command == "check":
         return _cmd_check()
     if args.command == "brief":

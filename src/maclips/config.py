@@ -135,3 +135,6 @@ def estimated_cost_usd(model: str, input_tokens: int, output_tokens: int) -> flo
     """Dollar cost of one call. Thinking tokens are billed as output."""
     rate_in, rate_out = TOKEN_RATES_USD_PER_MTOK.get(model, (0.0, 0.0))
     return (input_tokens * rate_in + output_tokens * rate_out) / 1_000_000
+
+# Installed macOS system font used by libass.
+CAPTION_FONT = os.getenv("MACLIPS_CAPTION_FONT", "Helvetica")

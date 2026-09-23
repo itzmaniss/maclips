@@ -427,15 +427,23 @@ def s6_visual_analysis(ctx: RunContext) -> StageOutput:
         if not has_video:
             raise GateFailure("S6", f"{video.name} has no video stream.")
 
-    # STUB: build step 6. A candidate with no face track is not a run-stopper;
+    video_path = locals().get("video")
+    if video_path is None:
+        video_path = Path(ctx.output("S0").get("video_path") or ctx.source)
+    # Face tracking lands in step 6. Persist media for cached downstream stages.
+    # A candidate with no face track is not a run-stopper;
     # it is restricted to letterbox, per §2.1.
-    return {"tracks": {}, "shots": [], "letterbox_only": [], **STUB}
+    return {"tracks": {}, "shots": [], "letterbox_only": [],
+            "video_path": str(video_path), "audio_path": str(ctx.source), **STUB}
 
 
 def s7_attribution(ctx: RunContext) -> StageOutput:
     """Speaker attribution and layout planning."""
     # STUB: build step 7, and only if the business gate G1 passes.
-    return {"plans": {}, "follow_crop_blocked": [], **STUB}
+    return {"plans": {str(c["rank"]): {
+        "centre": {"kind": "centre"}, "letterbox": {"kind": "letterbox"}}
+        for c in ctx.output("S5")["candidates"]},
+        "follow_crop_blocked": [c["rank"] for c in ctx.output("S5")["candidates"]]}
 
 
 # --------------------------------------------------------------------------- #
@@ -444,7 +452,8 @@ def s7_attribution(ctx: RunContext) -> StageOutput:
 
 def s8_proxy_render(ctx: RunContext) -> StageOutput:
     """540x960 h264_videotoolbox previews, captions burned, all layouts."""
-    return {"previews": {}, **STUB}
+    from .render_stages import proxy_render
+    return proxy_render(ctx)
 
 
 def s9_review(ctx: RunContext) -> StageOutput:
@@ -486,19 +495,8 @@ def s11_compliance(ctx: RunContext) -> StageOutput:
 
 def s12_final_render(ctx: RunContext) -> StageOutput:
     """The only full-quality encode: one ffmpeg pass from the original source."""
-    # STUB: build step 5 adds the filter_complex one-pass renderer.
-    rendered = list(_cfg(ctx, "stub_rendered", []) or [])
-    for clip in rendered:
-        drift = abs(clip.get("actual_duration_s", 0) - clip.get("planned_duration_s", 0))
-        if drift > FINAL_DURATION_TOLERANCE_S:
-            raise GateFailure(
-                "S12",
-                f"clip {clip.get('id')} duration drifted {drift:.3f}s from plan "
-                f"(tolerance {FINAL_DURATION_TOLERANCE_S}s).",
-            )
-        if not clip.get("has_audio", True):
-            raise GateFailure("S12", f"clip {clip.get('id')} rendered without an audio stream.")
-    return {"rendered": rendered, **STUB}
+    from .render_stages import final_render
+    return final_render(ctx)
 
 
 def s13_export_bundle(ctx: RunContext) -> StageOutput:
@@ -545,13 +543,13 @@ STAGES: tuple[StageSpec, ...] = (
               params=("expected_speaker_count", "full_diarization"),
               gate="Speakers holding >=5% of speaking time differ from the expected count"),
     StageSpec("S6", "visual-analysis", "scdet shots + Vision face tracks", s6_visual_analysis,
-              needs=("S4",),
+              needs=("S4",), version=2,
               gate="Video stream did not finish downloading; candidate with no face track is letterbox-only"),
     StageSpec("S7", "attribution", "Speaker attribution + layout plans", s7_attribution,
-              needs=("S6",),
+              needs=("S6",), version=2,
               gate="Low attribution confidence blocks follow-crop for that clip"),
     StageSpec("S8", "proxy-render", "540x960 videotoolbox previews", s8_proxy_render,
-              needs=("S7",), gate=""),
+              needs=("S7",), version=2, gate=""),
     StageSpec("S9", "review", "Human selection and trimming", s9_review,
               needs=("S8",), params=("approvals",), gate="Human gate by definition"),
     StageSpec("S10", "commentary", "Resolve commentary text", s10_commentary,
@@ -560,7 +558,7 @@ STAGES: tuple[StageSpec, ...] = (
               needs=("S10",), params=("stub_compliance_failures",),
               gate="Any mechanical failure blocks the clip"),
     StageSpec("S12", "final-render", "One-pass 1080x1920 libx264 encode", s12_final_render,
-              needs=("S11",), params=("stub_rendered",),
+              needs=("S11",), version=2,
               gate="Duration drift > 0.1s; wrong resolution; no audio stream"),
     StageSpec("S13", "export-bundle", "MP4 + caption.txt + checklist.md", s13_export_bundle,
               needs=("S12",), gate=""),

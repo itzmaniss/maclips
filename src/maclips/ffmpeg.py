@@ -54,7 +54,10 @@ def probe(path: Path) -> dict:
         raise FFmpegError(f"ffprobe returned unparseable JSON for {path}") from exc
 
     streams = data.get("streams", [])
+    video = next((s for s in streams if s.get("codec_type") == "video"), {})
     return {
+        "width": int(video.get("width", 0)),
+        "height": int(video.get("height", 0)),
         "duration_s": float(data.get("format", {}).get("duration", 0.0) or 0.0),
         "has_video": any(s.get("codec_type") == "video" for s in streams),
         "has_audio": any(s.get("codec_type") == "audio" for s in streams),

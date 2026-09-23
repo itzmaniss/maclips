@@ -41,6 +41,12 @@ def no_models(monkeypatch):
             for i, (s, e) in enumerate(spans)
         ]
 
+    from maclips import render
+    def fake_render(video, audio, candidate, words, layout, out_path, **kwargs):
+        return {"path": str(out_path), "planned_duration_s": candidate["end"]-candidate["start"],
+                "actual_duration_s": candidate["end"]-candidate["start"],
+                "width": 1080, "height": 1920, "has_audio": True, "wall_s": 0}
+    monkeypatch.setattr(render, "render_clip", fake_render)
     monkeypatch.setattr(transcribe_mod, "run", fake_run)
     monkeypatch.setattr(diarize_mod, "diarize", fake_diarize)
     monkeypatch.setattr(diarize_mod, "diarize_windows", fake_windows)
@@ -51,10 +57,10 @@ def make_ctx(tmp_path, source, **config):
     base = {
         "clip_class": "general-own",
         "min_duration_s": 1.0,          # the 3 s fixture is deliberately short
-        "approvals": [{"id": "c1", "commentary_mode": "none"}],
+        "approvals": [{"id": "c1", "rank": 1, "start": 0, "end": .3, "layout": "centre", "commentary_mode": "none"}],
         # S4 is window-only now and needs spans from S5; S5's own gate wants >=5.
         "stub_candidates": [
-            {"start": i * 0.4, "end": i * 0.4 + 0.3} for i in range(5)
+            {"rank": i+1, "start": i * 0.4, "end": i * 0.4 + 0.3} for i in range(5)
         ],
     }
     base.update(config)
@@ -386,13 +392,19 @@ def test_s10_blocks_unaccepted_commentary(tmp_path, tiny_av):
     assert gated is not None and gated.id == "S10"
 
 
-def test_s12_blocks_duration_drift(tmp_path, tiny_av):
-    ctx = make_ctx(
-        tmp_path, tiny_av,
-        stub_rendered=[{"id": "c1", "planned_duration_s": 42.0, "actual_duration_s": 42.4}],
-    )
-    gated = run_pipeline(ctx, STAGES).gated
-    assert gated is not None and gated.id == "S12" and "drifted" in gated.reason
+def test_s12_blocks_duration_drift(tmp_path, tiny_av, monkeypatch):
+    from maclips import render
+    from maclips.stages import s12_final_render
+    from maclips.orchestrator import GateFailure
+    ctx = make_ctx(tmp_path, tiny_av)
+    ctx.outputs.update({"S6": {"video_path":str(tiny_av), "audio_path":str(tiny_av)},
+                        "S3": {"words":[]}, "S9":{"approved":ctx.config["approvals"]},
+                        "S7":{"plans":{"1":{"centre":{"kind":"centre"}}}}})
+    def failed(*a, **kw):
+        raise render.RenderError("duration drift")
+    monkeypatch.setattr(render,"render_clip",failed)
+    with pytest.raises(GateFailure, match="duration drift"):
+        s12_final_render(ctx)
 
 
 def test_s14_blocks_campaign_clip_without_disclosure(tmp_path, tiny_av):
