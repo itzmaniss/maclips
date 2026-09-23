@@ -131,14 +131,106 @@ def test_empty_brief_is_refused_without_calling_the_model(monkeypatch):
         b.extract("   ")
 
 
-def test_unknown_fields_from_the_model_are_ignored(monkeypatch):
-    payload = json.dumps({
-        "brand": "Acme", "campaign_name": "S", "platforms_allowed": ["tiktok"],
-        "missing": [], "invented_field": "should be dropped",
-    })
+def _payload(**extra):
+    base = {"brand": "Acme", "campaign_name": "S", "platforms_allowed": ["tiktok"],
+            "missing": []}
+    base.update(extra)
+    return json.dumps(base)
+
+
+def test_unknown_field_from_the_model_stops_extraction_naming_it(monkeypatch):
+    """The session-2026-09-23 failure: Haiku returned `rate_per_1k_views` and
+    `from_dict()` silently dropped it. Now that stops, and says which field."""
+    payload = _payload(rate_per_1k_views=1.25)
+    monkeypatch.setattr("maclips.llm.complete", lambda *a, **k: payload)
+    with pytest.raises(BriefInvalid, match="rate_per_1k_views"):
+        b.extract("x")
+
+
+def test_from_dict_refuses_unknown_fields_naming_them():
+    with pytest.raises(BriefInvalid, match=r"unknown config field\(s\): cpm_usd, rates"):
+        CampaignConfig.from_dict({"brand": "A", "cpm_usd": 2, "rates": {}})
+
+
+def test_load_refuses_a_saved_config_with_an_unknown_field(tmp_path):
+    path = tmp_path / "c.json"
+    path.write_text(json.dumps({"brand": "A", "invented": 1}))
+    with pytest.raises(BriefInvalid, match="invented"):
+        b.load(path)
+
+
+@pytest.mark.parametrize(("extra", "field_named"), [
+    ({"rate_per_1k": "1.25"}, "rate_per_1k"),                    # wrong type
+    ({"deadline": 20261001}, "deadline"),
+    ({"rate_per_1k_by_platform": {"tiktok": "$1"}}, "rate_per_1k_by_platform.tiktok"),
+    ({"missing": ["duration_seconds"]}, "missing.0"),            # invented name
+    ({"raw_brief": "echoed"}, "raw_brief"),                      # not the model's to set
+])
+def test_schema_invalid_output_stops_naming_the_field(monkeypatch, extra, field_named):
+    payload = _payload(**extra)
+    monkeypatch.setattr("maclips.llm.complete", lambda *a, **k: payload)
+    with pytest.raises(BriefInvalid, match="does not match the schema") as info:
+        b.extract("x")
+    assert field_named in str(info.value)
+
+
+def test_missing_required_key_stops_extraction(monkeypatch):
+    payload = json.dumps({"brand": "Acme", "campaign_name": "S", "missing": []})
+    monkeypatch.setattr("maclips.llm.complete", lambda *a, **k: payload)
+    with pytest.raises(BriefInvalid, match="platforms_allowed"):
+        b.extract("x")
+
+
+def test_the_schema_is_sent_to_the_model(monkeypatch):
+    calls = []
+    monkeypatch.setattr("maclips.llm.complete",
+                        lambda prompt, **k: calls.append(prompt) or _payload())
+    b.extract("x")
+    assert '"rate_per_1k_by_platform"' in calls[0]
+    assert '"additionalProperties": false' in calls[0]
+
+
+def test_business_fields_are_extracted_and_pool_pct_derived(monkeypatch):
+    payload = _payload(rate_per_1k_by_platform={"tiktok": 2.0, "instagram": 2.0},
+                       pool_total=5000, pool_used=121, deadline=None,
+                       min_duration_s=10)
     monkeypatch.setattr("maclips.llm.complete", lambda *a, **k: payload)
     cfg = b.extract("x")
-    assert not hasattr(cfg, "invented_field")
+    assert cfg.rate_per_1k_by_platform == {"tiktok": 2.0, "instagram": 2.0}
+    assert cfg.pool_used_pct_at_join == 2.4
+    assert cfg.min_duration_s == 10
+    assert cfg.business_gate_gaps() == ["deadline"]
+
+
+def _cfg(**kw):
+    return CampaignConfig(brand="A", campaign_name="B", platforms_allowed=["tiktok"], **kw)
+
+
+def test_confirm_refuses_silently_null_business_fields():
+    cfg = _cfg()
+    with pytest.raises(BriefInvalid, match="rate_per_1k, pool_total, pool_used_pct_at_join, deadline"):
+        cfg.confirm()
+    assert not cfg.confirmed
+
+
+def test_confirm_passes_once_each_business_field_is_set_or_marked_unknown():
+    cfg = _cfg(rate_per_1k_by_platform={"tiktok": 1.25}, pool_total=1000.0)
+    cfg.mark_unknown("pool_used_pct_at_join")
+    cfg.mark_unknown("deadline")
+    cfg.confirm()
+    assert cfg.confirmed
+    assert cfg.unknown_confirmed == ["pool_used_pct_at_join", "deadline"]
+
+
+def test_empty_string_deadline_is_a_gap_not_a_value():
+    assert "deadline" in _cfg(deadline="").business_gate_gaps()
+
+
+def test_mark_unknown_refuses_non_business_and_already_set_fields():
+    with pytest.raises(BriefInvalid, match="not a business-gate field"):
+        _cfg().mark_unknown("brand")
+    with pytest.raises(BriefInvalid, match="already has a value"):
+        _cfg(pool_total=10.0).mark_unknown("pool_total")
 
 
 def test_round_trip_through_disk(tmp_path, monkeypatch):
@@ -156,3 +248,20 @@ def test_prompt_tells_the_model_to_admit_gaps():
     assert "missing" in b.EXTRACTION_PROMPT
     assert "Do not infer" in b.EXTRACTION_PROMPT
     assert "SECONDS" in b.EXTRACTION_PROMPT
+
+
+def test_truncated_json_completion_is_reported_as_truncation(monkeypatch):
+    """Lovable, 2026-09-23: finish_reason=length at the output cap surfaced as
+    'Unterminated string'. The seam now names the real cause."""
+    from types import SimpleNamespace
+
+    import litellm
+
+    from maclips import llm
+
+    resp = SimpleNamespace(choices=[SimpleNamespace(
+        finish_reason="length", message=SimpleNamespace(content='{"brand": "Lov'))])
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(litellm, "completion", lambda **k: resp)
+    with pytest.raises(RuntimeError, match="max_tokens=4096: the JSON output is truncated"):
+        llm.complete("p", model="anthropic/x", json_only=True, max_tokens=4096)

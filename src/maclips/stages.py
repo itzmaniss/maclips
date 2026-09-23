@@ -105,7 +105,7 @@ def s1_brief(ctx: RunContext) -> StageOutput:
     if ctx.output("S0")["clip_class"] != "campaign":
         return {"applicable": False}
 
-    from .brief import BriefRejected, CampaignConfig
+    from .brief import BriefInvalid, BriefRejected, CampaignConfig
 
     brief = dict(_cfg(ctx, "brief", {}) or {})
     if not brief:
@@ -115,7 +115,10 @@ def s1_brief(ctx: RunContext) -> StageOutput:
             "one first; S5 will not start without it.",
         )
 
-    cfg = CampaignConfig.from_dict(brief)
+    try:
+        cfg = CampaignConfig.from_dict(brief)
+    except BriefInvalid as exc:
+        raise GateFailure("S1", str(exc)) from exc
     try:
         cfg.check_category()
     except BriefRejected as exc:
@@ -130,6 +133,13 @@ def s1_brief(ctx: RunContext) -> StageOutput:
             "S1",
             "brief is not confirmed. S5 will not start on an unconfirmed brief "
             "(PLAN.md §2.1). Confirm it with `maclips brief --confirm`.",
+        )
+    gaps = cfg.business_gate_gaps()
+    if gaps:
+        raise GateFailure(
+            "S1",
+            f"confirmed brief has business-gate fields neither set nor marked "
+            f"unknown: {', '.join(gaps)} (PLAN.md §1.5). Re-confirm it.",
         )
     return {"applicable": True, "brief": cfg.as_dict()}
 

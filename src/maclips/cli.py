@@ -34,8 +34,10 @@ def _cmd_check() -> int:
 
 
 EDITABLE_HELP = """
-Commands: <field>=<value> to edit, 'list' to redisplay, 'confirm' to save,
-          'quit' to abandon. List fields take comma-separated values.
+Commands: <field>=<value> to edit, 'unknown <field>' to mark a business-gate
+          field as not known, 'list' to redisplay, 'confirm' to save,
+          'quit' to abandon. List fields take comma-separated values;
+          rate_per_1k_by_platform takes platform:rate pairs.
 """
 
 
@@ -46,12 +48,16 @@ def _render_brief(cfg) -> None:
     print(f"{cfg.brand or '(no brand)'} — {cfg.campaign_name or '(no campaign name)'}")
     print("=" * 70)
     for f in fields(cfg):
-        if f.name in ("raw_brief", "confirmed", "missing"):
+        if f.name in ("raw_brief", "confirmed", "missing", "unknown_confirmed"):
             continue
         value = getattr(cfg, f.name)
+        if isinstance(value, dict):
+            value = [f"{k}:{v}" for k, v in value.items()]
         shown = ", ".join(str(v) for v in value) if isinstance(value, list) else value
         flag = ""
-        if f.name in cfg.missing:
+        if f.name in cfg.unknown_confirmed:
+            flag = "   <- marked unknown by you"
+        elif f.name in cfg.missing:
             flag = "   <- brief did not specify this"
         elif shown in ("", None, []):
             flag = "   <- empty"
@@ -59,6 +65,9 @@ def _render_brief(cfg) -> None:
     problems = cfg.validate()
     if problems:
         print(f"\n  REQUIRED FIELDS STILL MISSING: {', '.join(problems)}")
+    gaps = cfg.business_gate_gaps()
+    if gaps:
+        print(f"  BUSINESS-GATE FIELDS TO SET OR MARK UNKNOWN: {', '.join(gaps)}")
 
 
 def _apply_edit(cfg, line: str) -> str:
@@ -69,12 +78,17 @@ def _apply_edit(cfg, line: str) -> str:
     name, _, raw = line.partition("=")
     name, raw = name.strip(), raw.strip()
     spec = {f.name: f for f in fields(cfg)}.get(name)
-    if spec is None or name in ("raw_brief", "missing"):
+    if spec is None or name in ("raw_brief", "missing", "unknown_confirmed", "confirmed"):
         return f"unknown field {name!r}"
 
     current = getattr(cfg, name)
     try:
-        if isinstance(current, list):
+        if isinstance(current, dict):
+            value = {}
+            for pair in filter(None, (v.strip() for v in raw.split(","))):
+                key, _, rate = pair.partition(":")
+                value[key.strip().lower()] = float(rate)
+        elif isinstance(current, list):
             value = [v.strip() for v in raw.split(",") if v.strip()]
         elif isinstance(current, bool) or spec.type == "bool":
             value = raw.lower() in ("1", "true", "yes", "y")
@@ -92,6 +106,8 @@ def _apply_edit(cfg, line: str) -> str:
     setattr(cfg, name, value)
     if name in cfg.missing:
         cfg.missing.remove(name)
+    if name in cfg.unknown_confirmed:
+        cfg.unknown_confirmed.remove(name)
     return ""
 
 
@@ -103,7 +119,11 @@ def _cmd_brief(args: argparse.Namespace) -> int:
     out = Path(args.out) if args.out else config.WORK_DIR / "campaigns" / f"{path.stem}.json"
 
     if args.reuse and out.is_file():
-        cfg = load(out)
+        try:
+            cfg = load(out)
+        except BriefInvalid as exc:
+            print(f"FAILED\n{exc}", file=sys.stderr)
+            return 2
         print(f"loaded existing config: {out}")
     else:
         if not path.is_file():
@@ -139,12 +159,19 @@ def _cmd_brief(args: argparse.Namespace) -> int:
         if line in ("list", "l"):
             _render_brief(cfg)
             continue
+        if line.startswith("unknown "):
+            try:
+                cfg.mark_unknown(line.split(None, 1)[1].strip())
+                print("  marked unknown")
+            except BriefInvalid as exc:
+                print(f"  {exc}")
+            continue
         if line in ("confirm", "c"):
-            problems = cfg.validate()
-            if problems:
-                print(f"  cannot confirm — still missing: {', '.join(problems)}")
+            try:
+                cfg.confirm()
+            except BriefInvalid as exc:
+                print(f"  {exc}")
                 continue
-            cfg.confirmed = True
             save(cfg, out)
             print(f"confirmed and saved: {out}")
             return 0

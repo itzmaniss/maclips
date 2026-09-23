@@ -52,6 +52,11 @@ def complete(
     text = response.choices[0].message.content or ""
     if not text.strip():
         raise RuntimeError(f"{model} returned an empty completion.")
+    if json_only and response.choices[0].finish_reason == "length":
+        # Truncated JSON is never valid; say why instead of a parse error.
+        raise RuntimeError(
+            f"{model} stopped at max_tokens={max_tokens}: the JSON output is truncated."
+        )
 
     if usage_sink is not None:
         usage = getattr(response, "usage", None)
@@ -85,8 +90,9 @@ def _with_model_hint(exc: Exception, model: str) -> Exception:
 
 def rank_fn(prompt: str, usage_sink: list | None = None) -> str:
     """The ranking tier (Sonnet). PLAN.md §5.2."""
+    # Sonnet 5 only supports temperature=1; keep all experiment runs identical.
     return complete(prompt, model=config.RANKING_MODEL, json_only=True,
-                    max_tokens=16000, usage_sink=usage_sink)
+                    max_tokens=16000, temperature=1, usage_sink=usage_sink)
 
 
 def brief_fn(prompt: str) -> str:
