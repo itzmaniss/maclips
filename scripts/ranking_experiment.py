@@ -5,7 +5,8 @@
 Four ranking runs over work/bench/transcript.json:
   A1, A2 — unlabelled transcript (what S5 actually sees since step 2b)
   B1, B2 — speaker-labelled transcript (from the cached full diarization)
-  C1, C2 — unlabelled, on Haiku 4.5 (experiment only; S5 stays on Sonnet)
+  C1, C2 — unlabelled, on Haiku 4.5: not run since session 2026-09-23e
+           (its candidates clustered in the first 21% of the source)
 
 Reports run-to-run overlap within each condition and across them, logs tokens
 and cost per call at the $2/$10 Sonnet 5 rate, re-measures window
@@ -83,8 +84,6 @@ def main() -> int:
     runs = [
         one_run("A1", "unlabelled", unlabelled),
         one_run("A2", "unlabelled", unlabelled),
-        one_run("C1", "haiku", unlabelled),
-        one_run("C2", "haiku", unlabelled),
         one_run("B1", "labelled", words),
         one_run("B2", "labelled", words),
     ]

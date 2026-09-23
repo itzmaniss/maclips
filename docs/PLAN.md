@@ -1205,6 +1205,61 @@ already have been sent. If it was, it is not in the ledger. It would cost
 about $0.13 if it matched A1 and A2, and at most $0.436 at the 32,000 cap.
 That puts the worst-case session total at $0.64, against a $3.00 cap.
 
+**Session 2026-09-23e: at 10–180 s, A1 and A2 kept 12/12; B1 stopped at the
+malformed-JSON gate [V].** The default range is now 10–180 s (§6.1). The
+prompt, effort (`low`) and model are unchanged. Condition C (Haiku) was
+removed from `scripts/ranking_experiment.py`. The script ran under a $1.50
+spend guard.
+
+| call | input | output | reasoning | finish | wall | cost | result |
+|---|---|---|---|---|---|---|---|
+| A1 attempt 1 | 60,906 | 1,301 | 0 | stop | 16.1 s | $0.1348 | malformed |
+| A1 retry | 60,977 | 1,124 | 0 | stop | 12.1 s | $0.1332 | **12 / 12 kept** |
+| A2 attempt 1 | 60,906 | 1,306 | 0 | stop | 14.3 s | $0.1349 | malformed |
+| A2 retry | 60,977 | 1,089 | 0 | stop | 11.5 s | $0.1328 | **12 / 12 kept** |
+| B1 attempt 1 | 79,725 | 1,347 | 0 | stop | 15.0 s | $0.1729 | malformed |
+| B1 retry | 79,796 | 1,169 | 0 | stop | 14.2 s | $0.1713 | **malformed: gate** |
+
+- **Durations.** A1 and A2 had no drops of any kind. A1, before snapping:
+  57.4–148.8 s, median 96.8 s; after: 58.0–157.5 s, median 98.9 s. A2,
+  before: 57.2–148.8 s, median 91.4 s; after: 58.9–157.5 s, median 95.8 s.
+  No span was under 57 s or over 158 s, so neither end of the range was
+  tested. Coverage: candidate starts ran 131–6,431 s (A1) and 234–6,371 s
+  (A2) of 7,066 s.
+- **Malformed first attempts: 4 of 4 since start times were added**
+  (session 2026-09-23d A1, and this session's A1, A2 and B1), and B1's retry
+  too. Each reply opens with a nested list, `{"candidates": [[…`. Some then
+  print a visible "Wait, I need…" and a second object, which the parser
+  rejects as extra data. B1's retry began `{"candidates": [[]][0] if False
+  else {…`. B1's first reply had a prose preamble. Before the times, 2 of 2
+  first attempts were valid (session 2026-09-23c). [I] The change
+  correlates with the bracketed `[1234 @ 12:03]` line prefixes, at 0
+  reasoning tokens. It is 6 calls, not a measured cause. No prompt change
+  was made.
+- **The run stopped at B1.** `ranking.rank` raised `RankingError` after
+  the retry, which is S5's malformed-JSON gate (§5.4 item 1). The script
+  does not catch it, so it exited with a traceback between calls, and every
+  call is in the ledger. B2, the comparison, the real-window diarization,
+  the blind sheet and the second source's S5 did not run. `work/experiment/`
+  is still empty.
+- **Within-condition overlap only, computed offline** from the two kept
+  runs with `experiment.compare`: **A1↔A2 = 42%** at IoU ≥ 0.5 (5 of 12;
+  50% at 0.3, 42% at 0.7). No cross-condition figure exists. That is
+  sampling noise for one condition, not a quality measure.
+- Spend: **$0.8799** of $1.50. Raw replies and the ledger are in
+  `work/session-20260923e/` (gitignored).
+
+**Found while preparing the second source [V, source reading, not
+executed]:** a resumed run cannot start at S5. `s5_rank` takes the
+transcript only from `ctx.shared["transcript"]`, which only a live
+`s3_transcribe` sets. So with S3 loaded from its checkpoint, S5 gates on
+"no transcript from S3 to rank." before any API call, and `--from S5`
+does the same. `orchestrator.RunContext.shared`'s docstring says "A resumed
+run finds `shared` empty and reloads from the S2 WAV, so nothing depends on
+it surviving". That holds for the waveform, but not for the transcript. The
+S3 checkpoint holds the words (`S3.json` `output.words`), but nothing reads
+them back. Not fixed here.
+
 ### 5.2d Brief extraction fix, 2026-09-23 [V]
 
 **Diagnosis first.** Each of the 8 captured files was checked for the
