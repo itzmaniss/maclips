@@ -121,6 +121,109 @@ def test_s0_gates_on_short_source_at_the_real_floor(tmp_path, tiny_av):
     assert "the floor is 120s" in gated.reason
 
 
+@pytest.fixture(scope="session")
+def audio_only(tmp_path_factory):
+    """What a split URL download hands S0: an audio-only .m4a."""
+    import subprocess
+
+    from maclips import config
+
+    path = tmp_path_factory.mktemp("media") / "vid.audio.m4a"
+    subprocess.run(
+        [str(config.FFMPEG), "-y", "-loglevel", "error",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+         "-c:a", "aac", str(path)],
+        check=True, capture_output=True,
+    )
+    return path
+
+
+def split_ctx(tmp_path, audio, video_result=None, **config):
+    """A URL source as cli._cmd_run builds it: ctx.source is the audio file,
+    and the video arrives on a background thread (§2.5)."""
+    import threading
+
+    from maclips.ingest import SourceRecord
+
+    record = SourceRecord(path=audio, origin="https://x/y", audio_path=audio,
+                          video_id="vid", duration_s=9999.0)
+    release = threading.Event()
+    result = {} if video_result is None else video_result
+
+    def fetch():
+        release.wait()
+
+    thread = threading.Thread(target=fetch, daemon=True)
+    thread.start()
+    if video_result is not None:
+        release.set()  # the download has already ended, with `result`
+    record._video_thread = thread
+    record._video_result = result
+    ctx = make_ctx(tmp_path, audio, source_record=record.as_dict(), **config)
+    ctx.shared["source_record"] = record
+    return ctx
+
+
+def test_s0_passes_split_url_source_whose_audio_file_has_no_video(tmp_path, audio_only):
+    """The video is still downloading at S0 by design; S6 checks it (§2.2 item 1)."""
+    report = run_pipeline(split_ctx(tmp_path, audio_only, video_wait_s=0.1), STAGES)
+    s0 = report.records[0]
+    assert s0.id == "S0" and s0.status == "ran", report.render()
+
+
+def test_s0_split_source_duration_floor_uses_the_probed_audio(tmp_path, audio_only):
+    """The record's metadata says 9999 s; the audio file is 3 s."""
+    gated = run_pipeline(split_ctx(tmp_path, audio_only, min_duration_s=120.0), STAGES).gated
+    assert gated is not None and gated.id == "S0"
+    assert "the floor is 120s" in gated.reason
+
+
+def test_s0_gates_split_source_whose_audio_file_has_no_audio(tmp_path, video_only):
+    gated = run_pipeline(split_ctx(tmp_path, video_only), STAGES).gated
+    assert gated is not None and gated.id == "S0"
+    assert "no audio stream" in gated.reason
+
+
+def test_s6_gates_when_the_video_never_lands(tmp_path, audio_only):
+    """Still downloading at the wait limit. `video_ready` would have read True here."""
+    ctx = split_ctx(tmp_path, audio_only, video_wait_s=0.1)
+    assert ctx.shared["source_record"].video_ready, "the bug S6 must not rely on"
+    gated = run_pipeline(ctx, STAGES).gated
+    assert gated is not None and gated.id == "S6"
+    assert "did not finish downloading" in gated.reason
+
+
+def test_s6_gates_when_the_video_download_failed(tmp_path, audio_only):
+    from maclips.ingest import IngestError
+
+    ctx = split_ctx(tmp_path, audio_only,
+                    video_result={"error": IngestError("video download failed: 403")})
+    gated = run_pipeline(ctx, STAGES).gated
+    assert gated is not None and gated.id == "S6"
+    assert "403" in gated.reason
+
+
+def test_s6_gates_on_a_cached_partial_video(tmp_path, audio_only):
+    """cached_streams globs `<id>.video.*`, which matches yt-dlp's resume files."""
+    from maclips.ingest import SourceRecord
+
+    part = tmp_path / "vid.video.mp4.part"
+    part.write_bytes(b"partial")
+    record = SourceRecord(path=audio_only, origin="https://x/y",
+                          audio_path=audio_only, video_path=part, video_id="vid")
+    ctx = make_ctx(tmp_path, audio_only, source_record=record.as_dict())
+    ctx.shared["source_record"] = record
+    gated = run_pipeline(ctx, STAGES).gated
+    assert gated is not None and gated.id == "S6"
+    assert "vid.video.mp4.part" in gated.reason
+
+
+def test_s6_passes_when_the_video_landed(tmp_path, audio_only, tiny_av):
+    ctx = split_ctx(tmp_path, audio_only, video_result={"path": tiny_av})
+    report = run_pipeline(ctx, STAGES)
+    assert report.ok, report.render()
+
+
 def test_s0_gates_on_unreadable_container(tmp_path):
     junk = tmp_path / "not-media.mp4"
     junk.write_bytes(b"this is not a container")

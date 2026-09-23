@@ -86,9 +86,15 @@ def s0_ingest(ctx: RunContext) -> StageOutput:
         probe = ffprobe(ctx.source)
     except FFmpegError as exc:
         raise GateFailure("S0", f"unreadable container: {exc}") from exc
-    probe.update({k: v for k, v in record.items() if k != "path"})
+    # The probed duration is what the floor checks, not the site's metadata.
+    probe.update({k: v for k, v in record.items() if k not in ("path", "duration_s")})
 
-    if not probe["has_video"] or not probe["has_audio"]:
+    if record.get("audio_path"):
+        # Split URL source: ctx.source is the audio-only file and the video is
+        # still downloading by design (§2.2 item 1). S6 gates on the video.
+        if not probe["has_audio"]:
+            raise GateFailure("S0", "source has no audio stream.")
+    elif not probe["has_video"] or not probe["has_audio"]:
         missing = "video" if not probe["has_video"] else "audio"
         raise GateFailure("S0", f"source has no {missing} stream.")
     floor = float(_cfg(ctx, "min_duration_s", MIN_SOURCE_DURATION_S))
@@ -383,13 +389,26 @@ def s6_visual_analysis(ctx: RunContext) -> StageOutput:
     S2-S5 never block on video bytes (§2.5).
     """
     record = ctx.shared.get("source_record")
-    if record is not None and not record.video_ready:
+    if record is not None and record.audio_path is not None:
+        # Split source. Not `record.video_ready`: that reads True while the
+        # video is still downloading, because video_path is unset until
+        # await_video returns.
+        from .ffmpeg import FFmpegError, probe as ffprobe
         from .ingest import IngestError, await_video
 
         try:
-            await_video(record, timeout=float(_cfg(ctx, "video_wait_s", 1800.0)))
+            video = await_video(record, timeout=float(_cfg(ctx, "video_wait_s", 1800.0)))
         except IngestError as exc:
-            raise GateFailure("S6", f"video stream unavailable: {exc}") from exc
+            raise GateFailure("S6", f"video stream did not finish downloading: {exc}") from exc
+        # A cache hit can name yt-dlp's resume files for an interrupted download.
+        if video.suffix in (".part", ".ytdl") or not video.is_file():
+            raise GateFailure("S6", f"video stream did not finish downloading: {video.name}")
+        try:
+            has_video = ffprobe(video)["has_video"]
+        except FFmpegError as exc:
+            raise GateFailure("S6", f"video file is unreadable: {exc}") from exc
+        if not has_video:
+            raise GateFailure("S6", f"{video.name} has no video stream.")
 
     # STUB: build step 6. A candidate with no face track is not a run-stopper;
     # it is restricted to letterbox, per §2.1.
@@ -487,7 +506,7 @@ def s14_post_track(ctx: RunContext) -> StageOutput:
 STAGES: tuple[StageSpec, ...] = (
     StageSpec("S0", "ingest", "Register + probe the source", s0_ingest,
               params=("clip_class", "min_duration_s", "source_record"),
-              gate="No video/audio stream; unreadable container; duration under 2 min"),
+              gate="No audio stream (plus no video stream for a local file); unreadable container; duration under 2 min"),
     StageSpec("S1", "brief", "Extract + confirm the campaign brief", s1_brief,
               needs=("S0",), params=("brief",),
               gate="Unconfirmed brief blocks S5; crypto/gambling category rejected"),
@@ -509,7 +528,7 @@ STAGES: tuple[StageSpec, ...] = (
               gate="Speakers holding >=5% of speaking time differ from the expected count"),
     StageSpec("S6", "visual-analysis", "scdet shots + Vision face tracks", s6_visual_analysis,
               needs=("S4",),
-              gate="Both streams must have downloaded; candidate with no face track is letterbox-only"),
+              gate="Video stream did not finish downloading; candidate with no face track is letterbox-only"),
     StageSpec("S7", "attribution", "Speaker attribution + layout plans", s7_attribution,
               needs=("S6",),
               gate="Low attribution confidence blocks follow-crop for that clip"),

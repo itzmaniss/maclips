@@ -562,6 +562,56 @@ background video download: `BcrjhdSUv4Y.video.mp4.part` (16.6 MB) remains in
 timings, the weak-word fraction and the S3 gate outcome for this source are
 still unmeasured.
 
+**Fixed in session 2026-09-23d; the fix closes this bug [V, tests + real
+run].** For a split URL source (`source_record.audio_path` set), S0 now
+requires only an audio stream in the audio file. The video is not checked at
+S0, because it is still downloading by design (§2.2 item 1). The duration
+floor uses the probed audio duration, no longer the site metadata, which
+previously overwrote it. A local file keeps the old check: both streams in one
+file. **S6 did not gate on the video either, and now does.**
+`SourceRecord.video_ready` reads True while the video is still downloading,
+because `download_split` leaves `video_path` unset until `await_video`
+returns. So S6 never waited. S6 now calls `await_video` for every split
+source. It gates if the download failed or is still running at `video_wait_s`.
+It also gates if the file is a yt-dlp `.part`/`.ytdl` resume file, or if it
+probes without a video stream. The resume-file case is real:
+`ingest.cached_streams` globs `<id>.video.*`, and with the leftover files
+above it returned `BcrjhdSUv4Y.video.mp4.ytdl` as the cached video. **That
+glob is still in `ingest.py`, which this session did not change.** S6 now
+catches its effect, but a re-run with leftovers is a false cache hit and
+never downloads the video. The leftover `.part` (16.6 MB) and `.ytdl` were
+moved, not deleted, to `work/session-20260923d/prior-sources/` along with the
+old audio. The real run then downloaded both streams fresh (§2.6d). Seven
+tests cover this in `tests/test_stages.py`; six of them fail on the old code.
+
+### 2.6d Second source, S0-S3 through the CLI, session 2026-09-23d [V]
+
+This was the first `maclips run <url>` to get past S0 (§2.6c). It ran the
+committed CLI with the stage list cut before S5, so no API call was possible:
+`--language en --clip-class general-own`, cold S0 (no cached streams), warm
+models, and no other MPS job running.
+
+| measure | value |
+|---|---|
+| audio ready (time to S2 start) | **6.5 s** (32.6 MB `.m4a`) |
+| S0 stage body (probe + gates) | 0.06 s — passed |
+| S2 extract | 1.65 s |
+| S3 transcribe | 160.3 s |
+| S3 align | 45.2 s |
+| S3 total | 205.5 s — passed |
+| wall, start to S3 done | 215 s |
+| video | 651.1 MiB, 1920×1080, 2,016.3 s, **landed before S3 finished** (0.0 s wait) |
+
+Audio is 2,016.4 s (33 m 36 s). S3 produced **7,721 words** in 668 sentences.
+Detected language was `en`, so the language gate passed. **Weak words: 2.20%**
+at `min_score = 0.10`, against the 12% ceiling, so the S3 gate passed; the
+benchmark source was 3.59%. There were 0 interpolated and 0 unaligned words.
+Median score was 0.832, and coverage read 100.00%. S3 ran at about 9.8×
+realtime, against about 16× for the benchmark source (441.5 s for 7,066 s).
+The difference is not explained; this is one run [U]. Checkpoints are in
+`work/7899e5b0d2733cfe/` and the log is `work/session-20260923d/s0-s3.log`
+(gitignored).
+
 ### 2.7 The S3 alignment gate, set from data [V]
 
 **Correction to §2.6.** The 100.00% coverage figure was first explained here as
