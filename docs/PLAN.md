@@ -523,6 +523,30 @@ accepted argument anywhere in the code.
 **Alignment quality against the chosen gate:** 19,621 words, **3.59% weak** at
 `min_score = 0.10`, against a 12% ceiling (§2.7). Coverage still reads 100.00%.
 
+### 2.6c Second source, session 2026-09-23c: stopped at S0 [V]
+
+Source: Double Coverage Podcast, `BcrjhdSUv4Y` ("Brez Scales On How He Fixed
+His Hairline…"). Uploaded 2026-09-05, 33 m 36 s, English (`en-US`). The best
+available resolution is 1920×1080 16:9, so the 9:16 crop is 607 px wide, a
+1.78× upscale to 1080 (§2.5). It was the newest qualifying upload. The two
+newer uploads were skipped as under 30 minutes: `XHpWQ14EQac` (29 m 08 s) and
+`CUXbgqvVOrU` (27 m 09 s). It ran as `--clip-class general-own
+--language en`. That class is an experiment label only: the Reach brief is
+unconfirmed, and S5 does not use an unconfirmed brief. Nothing is exported
+or posted.
+
+**The run stopped at the S0 download-failure gate** after 7.4 s. The audio
+stream returned "HTTP Error 403: Forbidden", no stage from S2 on ran, and
+there was no API spend. **The failure did not come back:** three later
+verbose audio downloads of the same video, one partial and two full,
+succeeded with the same pinned yt-dlp 2026.08.19, yt-dlp-ejs 0.8.0 and Deno
+2.9.7. yt-dlp logs a GVS PO-token binding experiment and SABR-forced web
+formats for this video. [I] The likely cause is an intermittent 403 on a
+format URL from a client that needs a PO token, not a stale extractor.
+Nothing was upgraded and the gate was not loosened. S0-S3 timings, the
+weak-word fraction and the S3 gate outcome for this source are still
+unmeasured.
+
 ### 2.7 The S3 alignment gate, set from data [V]
 
 **Correction to §2.6.** The 100.00% coverage figure was first explained here as
@@ -789,12 +813,12 @@ If the heuristic misses the threshold on two-shot sources:
   16,000-token cap on the first live call (§5.2c). `rank_fn` sets
   `reasoning_effort="low"` and `max_tokens=32000`, which caps thinking and
   JSON together. Temperature is omitted.
-- **Cost per source: input is measured, output is not yet [V / U].** Input is
-  **44,014 tokens unlabelled** (§5.2b), $0.088. **Output now includes
-  thinking tokens**, which are billed at the output rate: ~2k tokens of JSON
-  plus low-effort thinking of unmeasured length [U]. The worst case at the
-  32,000 cap is $0.41 per unlabelled call. The measured figure replaces this
-  bullet once step 4's runs log real `usage` (§5.2c).
+- **Cost per source: $0.10 unlabelled, measured on 2 calls [V].** 44,014
+  input tokens ($0.088) plus about 1,250 output tokens ($0.0125). The output
+  count includes the thinking tokens, which are billed as output; low effort
+  used only 21-32 of them. Wall time was 14-16 s. The worst case at the
+  32,000 cap is $0.41. Both calls hit the survivor gate, so this is the cost
+  of a call, not yet of a usable candidate list (§5.2c).
 - **Tokenizer.** The current-generation tokenizer uses more tokens per
   character than older estimates assumed: the `chars / 4` estimate was 1.47x
   too low on the benchmark transcript (§5.2b) [V]. Budget from
@@ -972,6 +996,37 @@ Corrections made earlier in this session: the S3 threshold is 12%, not 5%;
 window-only S4 is already implemented; 61.5 s used placeholders; 114.9x used
 the wrong realtime denominator; 21.2% is character overhead; §3's future
 components are not built; and linked-doc capture is already built, not v2.
+
+**Session 2026-09-23c: first working ranking calls, then the survivor gate
+[V].** With low-effort thinking (§5.2), both calls finished normally, with
+valid JSON on the first attempt:
+
+| run | input | output | reasoning | finish | wall | cost | survivors |
+|---|---|---|---|---|---|---|---|
+| A1 unlabelled | 44,014 | 1,262 | 21 | stop | 16.1 s | $0.1006 | **4 / 12** |
+| A2 unlabelled | 44,014 | 1,248 | 32 | stop | 13.8 s | $0.1005 | **3 / 12** |
+
+The measured cost per source is **$0.10** unlabelled, and ranking takes
+**14-16 s**, under the 20-60 s allowance in §2.6b. Whether `reasoning` is the
+count the API reported or LiteLLM's estimate from the summarized thinking
+text is not verified [U].
+
+**Both runs hit the five-survivor gate (§5.4 item 5).** Every drop was a
+duration drop (8 and 9), with no overlap and no out-of-range drops. The
+model's own spans are too long. Before snapping, 6 of A1's 8 dropped spans
+and 8 of A2's 9 were already over 60 s: 97-427 words and up to 142 s, against
+the prompt's "roughly 75-150 words". Outward snapping (§2.2 item 3) pushed
+the rest over 60 s: A1 56.7 to 60.9 s and 59.0 to 66.2 s, A2 59.0 to 66.2 s.
+[I] With only about 20-30 thinking tokens, the model does not check span
+length against the word guidance. The experiment was stopped before B1 and
+B2. There are no blind sheet, no overlap figures and no real-window
+diarization timing yet. Raw outputs are in `work/session-20260923c/raw/`
+(gitignored). Not changed here: the prompt, the snapping direction and the
+duration filter. Which of them to change is a decision.
+
+`scripts/ranking_experiment.py` records `insufficient` but does not stop on
+it. It continues to the next run, to diarization and to the blind sheet, so a
+gated run can still reach the blind sheet. It was stopped by hand this time.
 
 ### 5.2d Brief extraction fix, 2026-09-23 [V]
 
