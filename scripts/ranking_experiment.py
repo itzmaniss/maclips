@@ -50,11 +50,18 @@ def one_run(label: str, condition: str, words: list[dict]) -> Run | None:
     def call(prompt: str) -> str:
         return fn(prompt, usage_sink=usage)
 
-    with measure(f"rank {label}") as m:
-        candidates, meta = ranking.rank(
-            words, llm_fn=call, count=COUNT,
-            with_speakers=(condition == "labelled"),
-        )
+    try:
+        with measure(f"rank {label}") as m:
+            candidates, meta = ranking.rank(
+                words, llm_fn=call, count=COUNT,
+                with_speakers=(condition == "labelled"),
+            )
+    except ranking.RankingError as exc:
+        # The S5 malformed-JSON gate (§5.4 item 1): stop before any further call.
+        cost = sum(u["cost_usd"] for u in usage)
+        print(f"STOPPED: {label} ({condition}) malformed JSON after the retry: {exc} | "
+              f"{len(usage)} calls, cost ${cost:.3f}; no further runs.", file=sys.stderr)
+        raise SystemExit(2) from None
     tokens = sum(u["input_tokens"] for u in usage), sum(u["output_tokens"] for u in usage)
     reasoning = sum(u["reasoning_tokens"] for u in usage)
     cost = sum(u["cost_usd"] for u in usage)

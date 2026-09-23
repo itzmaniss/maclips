@@ -889,8 +889,9 @@ If the heuristic misses the threshold on two-shot sources:
   times it was $0.13 (60,906 input; §5.2c, sessions 2026-09-23d and e). The
   output count includes the thinking tokens, which are billed as output; low
   effort used 0-32 of them. Wall time was 11-16 s. The worst case at the
-  32,000 cap is $0.41. A retry doubles the cost of a run. Session 2026-09-23f's
-  calls on this prompt are in §5.2e.
+  32,000 cap is $0.41. A retry doubles the cost of a run. Session 2026-09-23f
+  confirmed it: $0.1008 and $0.1007 (§5.2e). Labelled is about $0.14
+  (62,833 input).
 - **Tokenizer.** The current-generation tokenizer uses more tokens per
   character than older estimates assumed: the `chars / 4` estimate was 1.47x
   too low on the benchmark transcript (§5.2b) [V]. Budget from
@@ -1287,6 +1288,47 @@ stubbed `rank_fn` and no network: S5 after a checkpointed S3 sees the same
 words, builds the same prompt and returns the same candidates as after a live
 S3, with S3 not recomputed. A run with `from_stage="S5"` after an S0–S3 run
 reaches the ranking call. Both tests fail on the previous code.
+
+**Experiment rerun on the reverted prompt: A1 and A2 kept 12/12 on the first
+attempt; B1 stopped at the malformed-JSON gate [V].** Sonnet 5, low effort,
+10–180 s, benchmark source, $1.50 spend guard. `scripts/ranking_experiment.py`
+now stops with `STOPPED`, exit code 2 and no traceback when `ranking.rank`
+raises the malformed-JSON `RankingError`, as it already did on the survivor
+gate. This was checked offline first with a stub that always returns
+malformed JSON: two calls, then the exit.
+
+| call | input | output | reasoning | finish | wall | cost | result |
+|---|---|---|---|---|---|---|---|
+| A1 | 44,014 | 1,276 | 24 | stop | 16.5 s | $0.1008 | valid, **12 / 12 kept** |
+| A2 | 44,014 | 1,269 | 22 | stop | 14.5 s | $0.1007 | valid, **12 / 12 kept** |
+| B1 attempt 1 | 62,833 | 1,269 | 0 | stop | 13.6 s | $0.1384 | malformed |
+| B1 retry | 62,904 | 1,242 | 0 | stop | 14.0 s | $0.1382 | **malformed: gate** |
+
+- **A1 and A2:** valid JSON on the first attempt, and no drops of any kind.
+  After snapping, A1's spans were 14.3–148.5 s (median 84.7 s) and A2's
+  14.3–178.9 s (median 85.1 s). Each run had one span under 10 s before
+  snapping (9.5 s, 14.3 s after), and A2 had one at 178.9 s, close to the cap.
+  Candidate starts ran 234–6,431 s (A1) and 234–6,712 s (A2) of 7,066 s.
+- **Within-condition overlap, A1↔A2: 50% at IoU ≥ 0.5** (6 of 12; 58% at
+  0.3, 50% at 0.7). Session 2026-09-23e measured 42% on the timestamped
+  prompt. That is sampling noise for one condition, not a quality measure. No
+  cross-condition figure exists.
+- **B1:** both replies open `{"candidates": [[{}]]}` and `{"candidates":
+  [[\n\n][0]}`, then a visible "Wait, that's malformed. Let me redo
+  properly." or "Let me redo this properly.", then a second complete object.
+  The parser rejects the extra data, which is correct.
+- **Cause, [I], 10 calls across sessions c, d, e and f.** Removing the times
+  did not fix the labelled form. First attempts: unlabelled without times
+  4/4 valid; unlabelled with times 0/3; labelled with times 0/2; labelled
+  without times 0/2. The failures follow either the prefix format (a time or
+  a speaker label after the index) or prompt size: every 44,014-token prompt
+  was valid, and no first attempt at 60,906 tokens or more was. These calls
+  cannot separate the two. All four labelled calls reported 0 reasoning
+  tokens. No prompt change was made.
+- **Stopped at B1, per the session's rule.** B2, the comparison, the
+  real-window diarization, the blind sheet and the second source's S5 did
+  not run. `work/experiment/` is still empty. Spend: **$0.4781** of $1.50.
+  Raw replies and the ledger are in `work/session-20260923f/` (gitignored).
 
 ### 5.2d Brief extraction fix, 2026-09-23 [V]
 
