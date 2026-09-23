@@ -779,24 +779,29 @@ If the heuristic misses the threshold on two-shot sources:
 ### 5.2 Model and cost
 
 - **Model: Sonnet (`claude-sonnet-5`).** This deliberately breaks your "ranking → Haiku" tiering rule. This ranking is the quality-critical judgement that decides which moments ever reach approval.
-- **Cost: [U] — the Sonnet 5 rate is disputed and this number is not settled.**
-  Sources conflict on whether Sonnet 5's introductory pricing became
-  permanent: **$2 / $10** per million tokens (input/output) and **$3 / $15**
-  are both cited. At ~30k input plus ~4k output per source that is
-  **$0.10 or $0.15 per source** — a 50% spread on the headline cost figure.
-
-  Two further reasons not to trust either number yet:
-
-  - **Tokenizer.** The current-generation tokenizer can consume up to
-    **~1.35× more tokens** for the same text than earlier models, so a token
-    count estimated from older assumptions understates the bill. Re-baseline
-    with `count_tokens` rather than reasoning from character counts. [R]
-  - The 30k input figure is itself an estimate (§5.1), not a measurement.
-
-  **Resolution: measure, don't budget.** Step 4 logs real `usage` (input,
-  output, and cache-read tokens) per ranking call, so the cost per source is a
-  measured number by the time it feeds the business gate (§1.5). Do not put a
-  cost assumption on the critical path before then.
+- **Rate: $2 / $10 per million tokens (input/output) [V].** Anthropic's
+  pricing page (fetched 2026-09-23) says the introductory price is now the
+  standard price and the rise to $3/$15 will not occur (§5.2c).
+  `config.TOKEN_RATES_USD_PER_MTOK` carries this one rate; the disputed-rate
+  range and `cost_range_usd()` were removed on 2026-09-23.
+- **Thinking: adaptive at `low` effort [decision, user].** Omitting `thinking`
+  runs Sonnet 5 at its default high effort, which spent the whole
+  16,000-token cap on the first live call (§5.2c). `rank_fn` sets
+  `reasoning_effort="low"` and `max_tokens=32000`, which caps thinking and
+  JSON together. Temperature is omitted.
+- **Cost per source: input is measured, output is not yet [V / U].** Input is
+  **44,014 tokens unlabelled** (§5.2b), $0.088. **Output now includes
+  thinking tokens**, which are billed at the output rate: ~2k tokens of JSON
+  plus low-effort thinking of unmeasured length [U]. The worst case at the
+  32,000 cap is $0.41 per unlabelled call. The measured figure replaces this
+  bullet once step 4's runs log real `usage` (§5.2c).
+- **Tokenizer.** The current-generation tokenizer uses more tokens per
+  character than older estimates assumed: the `chars / 4` estimate was 1.47x
+  too low on the benchmark transcript (§5.2b) [V]. Budget from
+  `count_tokens`, not character counts.
+- **Usage is logged per call, including failed calls [V, tests].**
+  `llm.complete` records input, output, reasoning, cache-read and
+  cache-creation tokens, `finish_reason` and cost before any raise.
 
 - **Haiku 4.5** ($1 / $5 per million tokens [R]; model id `claude-haiku-4-5`,
   no date suffix) is used for:
@@ -828,10 +833,8 @@ including instructions). The count is identical with and without
 **Speaker labels add 21.2% more characters but 42.8% more tokens [V]**
 (+18,819 tokens, about +$0.038 input per source at $2/MTok).
 
-**Cost is reported as a range, not a number.** Because the Sonnet 5 rate is
-disputed ($2/$10 vs $3/$15, §5.2), every logged call carries both figures and
-`config.cost_range_usd()` returns a list. At ~30k input and ~4k output that is
-**$0.10 - $0.15 per source**, and it stays a range until an invoice settles it.
+**Cost is a single number since 2026-09-23 [V].** The rate is settled at
+$2/$10 (§5.2). The range reporting this paragraph described has been removed.
 
 ### 5.2c Session 2026-09-23: real briefs and ranking experiment [V]
 
@@ -944,14 +947,22 @@ candidates, no blind sheet and no real-window diarization timing exist;
 "The $2/$10 … pricing for Claude Sonnet 5, announced at launch as
 introductory pricing through August 31, 2026, is now the standard price. The
 previously scheduled increase to $3/$15 … will not occur." The dispute in
-§5.2 and the $3/$15 entry in `config.DISPUTED_RATES_USD_PER_MTOK` are stale.
-They are not changed here.
+§5.2 and the $3/$15 entry in `config.DISPUTED_RATES_USD_PER_MTOK` were stale.
+Both were corrected in session 2026-09-23c.
 
 **Open, for the user [decision]:** whether ranking should think at all. The
 options are: thinking disabled (≈2k output, ≈$0.11/source unlabelled, tens of
 seconds [I]); adaptive at `low`/`medium` effort with a larger cap (thinking
 length [U]); or default `high` with a 64k cap and streaming (≥16k thinking
-observed, up to ≈$0.73/source). No fix is applied yet.
+observed, up to ≈$0.73/source). No fix is applied yet. **Decided and applied (session 2026-09-23c) [V]:**
+adaptive thinking at `low` effort. The body installed LiteLLM 1.102.0 now
+sends for `rank_fn`, captured offline the same way: `{"model":
+"claude-sonnet-5", "max_tokens": 32000, "thinking": {"type": "adaptive",
+"display": "summarized"}, "output_config": {"effort": "low"}}`. There is no
+temperature and no beta header. `display: "summarized"` is LiteLLM's own
+addition and changes visibility only, not billing. `llm.complete` now reports
+`finish_reason == "length"` as truncation before the empty-text check and
+records usage before any raise. `tests/test_llm.py` pins each of these.
 
 The built-in comparison verdict uses a fixed 15-percentage-point heuristic,
 not a significance test. Report within-condition noise before cross-condition
@@ -1040,7 +1051,15 @@ and retention requirements (§5.2c).
 
 ### 5.3 Prompt contract
 
-The prompt returns JSON only, validated against a schema. Per candidate:
+The prompt asks for JSON only. **JSON is enforced client-side only [V]:**
+`rank_fn` passes `response_format={"type": "json_object"}`, but LiteLLM
+1.102.0 drops it for Anthropic when no schema is attached, so it never
+reaches the API (§5.2c; the captured body has no `response_format` and no
+`output_config.format`). `ranking.parse_candidates` checks the essentials
+(a `candidates` array, integer word indices); `RANKING_SCHEMA` is not sent
+and not validated against. API-side structured outputs
+(`output_config.format` with a JSON schema) is a follow-up, untested on
+Sonnet 5 with thinking on [U]. Per candidate:
 
 - `start_word`, `end_word`;
 - `hook_text` (at most ~8 words, for the on-screen opener);

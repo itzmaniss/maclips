@@ -7,7 +7,7 @@ Four ranking runs over work/bench/transcript.json:
   B1, B2 — speaker-labelled transcript (from the cached full diarization)
 
 Reports run-to-run overlap within each condition and across them, logs tokens
-and cost per call at both disputed Sonnet rates, re-measures window
+and cost per call at the $2/$10 Sonnet 5 rate, re-measures window
 diarization on the real candidate windows, and writes a blind review sheet.
 """
 from __future__ import annotations
@@ -45,10 +45,10 @@ def one_run(label: str, condition: str, words: list[dict]) -> Run:
             with_speakers=(condition == "labelled"),
         )
     tokens = sum(u["input_tokens"] for u in usage), sum(u["output_tokens"] for u in usage)
-    costs = config.cost_range_usd(config.RANKING_MODEL, *tokens)
+    reasoning = sum(u["reasoning_tokens"] for u in usage)
+    cost = config.estimated_cost_usd(config.RANKING_MODEL, *tokens)
     print(f"-> {label} ({condition}): {len(candidates)} candidates in {m.wall_s:.1f}s | "
-          f"in={tokens[0]} out={tokens[1]} | "
-          f"cost {' - '.join(f'${c:.3f}' for c in costs)} | "
+          f"in={tokens[0]} out={tokens[1]} reasoning={reasoning} | cost ${cost:.3f} | "
           f"attempts={meta['attempts']} dropped={meta['dropped']}", flush=True)
     return Run(label=label, condition=condition,
                candidates=[c.as_dict() for c in candidates], usage=usage)
@@ -69,11 +69,10 @@ def main() -> int:
 
     total_in = sum(u["input_tokens"] for r in runs for u in r.usage)
     total_out = sum(u["output_tokens"] for r in runs for u in r.usage)
-    total = config.cost_range_usd(config.RANKING_MODEL, total_in, total_out)
-    print(f"\ntotal: in={total_in} out={total_out} "
-          f"cost {' - '.join(f'${c:.3f}' for c in total)} across 4 runs", flush=True)
-    per_source = config.cost_range_usd(config.RANKING_MODEL, total_in // 4, total_out // 4)
-    print(f"per source (1 run): {' - '.join(f'${c:.3f}' for c in per_source)}", flush=True)
+    total = config.estimated_cost_usd(config.RANKING_MODEL, total_in, total_out)
+    print(f"\ntotal: in={total_in} out={total_out} cost ${total:.3f} across 4 runs", flush=True)
+    per_source = config.estimated_cost_usd(config.RANKING_MODEL, total_in // 4, total_out // 4)
+    print(f"per source (1 run): ${per_source:.3f}", flush=True)
 
     print("\n=== span overlap (IoU >= 0.5 counts as the same moment) ===", flush=True)
     result = compare(runs)

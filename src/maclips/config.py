@@ -31,18 +31,13 @@ COMMENTARY_MODEL = os.getenv("MACLIPS_COMMENTARY_MODEL", "anthropic/claude-haiku
 
 # Per-million-token rates (input, output).
 #
-# **Sonnet 5's rate is disputed** — $2/$10 and $3/$15 are both cited, and
-# whether the introductory pricing became permanent is unsettled (§5.2). Rather
-# than pick a side, both are carried and every cost is reported as a range
-# until a real invoice settles it.
+# Sonnet 5 is $2/$10: the introductory price became the standard price and the
+# scheduled rise to $3/$15 will not occur (Anthropic pricing page, fetched
+# 2026-09-23; §5.2).
 TOKEN_RATES_USD_PER_MTOK = {
     "anthropic/claude-sonnet-5": (2.00, 10.00),
     "anthropic/claude-haiku-4-5": (1.00, 5.00),
     "anthropic/claude-haiku-4-5-20251001": (1.00, 5.00),
-}
-
-DISPUTED_RATES_USD_PER_MTOK = {
-    "anthropic/claude-sonnet-5": [(2.00, 10.00), (3.00, 15.00)],
 }
 
 # --------------------------------------------------------------------------- #
@@ -137,20 +132,6 @@ class Secrets:
 
 
 def estimated_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
-    """Dollar cost of one call at the primary rate."""
+    """Dollar cost of one call. Thinking tokens are billed as output."""
     rate_in, rate_out = TOKEN_RATES_USD_PER_MTOK.get(model, (0.0, 0.0))
     return (input_tokens * rate_in + output_tokens * rate_out) / 1_000_000
-
-
-def cost_range_usd(model: str, input_tokens: int, output_tokens: int) -> list[float]:
-    """Cost under every rate still in dispute for this model (§5.2).
-
-    Returns one figure per candidate rate, low first. A single number would
-    imply a precision the pricing question does not have.
-    """
-    pairs = DISPUTED_RATES_USD_PER_MTOK.get(model)
-    if not pairs:
-        return [estimated_cost_usd(model, input_tokens, output_tokens)]
-    return sorted(
-        (input_tokens * i + output_tokens * o) / 1_000_000 for i, o in pairs
-    )
