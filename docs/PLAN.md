@@ -1344,8 +1344,8 @@ malformed JSON: two calls, then the exit.
   it replaces the placeholder-window timing for these 24 spans only.
 - Second source: real CLI entry point with an API spend wrapper, requested
   `--from S5 --language en --clip-class general-own`. S0–S3 recomputed
-  (S3 127.66 s), rather than loading the earlier cache. The cache-miss cause
-  remains [U]; no cache keys were overwritten to force reuse.
+  (S3 127.66 s), rather than loading the earlier cache. Session 2026-09-25a
+  found the cause (§5.2g): S0's key hashed `video_path`.
   S5 stopped at malformed JSON after its one retry. No candidates or second
   sheet, and S4 onward did not execute. No prompt changes or further calls.
 - Ledger: call 1 **16,495 input / 1,175 output / 20 reasoning**, 14.018 s,
@@ -1356,6 +1356,37 @@ malformed JSON: two calls, then the exit.
 - Phase 0's gate exception applies: stop that run and continue render work.
   The second source cannot supply real candidates for later face-track tests
   until ranking succeeds; no failed reply was repaired or salvaged.
+
+### 5.2g Session 2026-09-25a: cache fix, API-enforced ranking output, two more sources
+
+**Phase 1: the `--from S5` cache miss [V].** S0's params include
+`source_record`. The CLI filled it from `SourceRecord.as_dict()`, which
+carried `video_path`. `resolve()` sets `video_path` only when both streams
+are already on disk. On a fresh download it returns before the video lands,
+so `video_path` is None. Session d's S0–S3 run logged `resolve returned: …
+video=None` (`work/session-20260923d/s0-s3.log`). Session g's rerun hit the
+stream cache, so `video_path` was set. S0's key changed, and the change
+cascaded through S1–S3. The key was reconstructed with no API call:
+`video_path` set gives `a9fedcc9381b3b43`, which equals session g's S0
+checkpoint, and `video_path` None gives `b06923c6b77d96b8` [V]. That this
+second key was session d's is [I], because session g overwrote that
+checkpoint.
+
+- **Fix:** `cli._cmd_run` keeps `video_path` out of `source_record`. Its
+  value depends on download timing, not on the source or a parameter. S6
+  reads the video from the live record in `shared`, and never read this
+  copy. Every other field of the record still keys S0.
+- **Tests:** `tests/test_cli.py` runs the real CLI entry point twice. On the
+  first run the video is still downloading. On the second it has landed and
+  the run uses `--from S5`. S0 and S1 must load from cache, and this test
+  fails on the old code. A second test checks that a changed record field
+  (the title) still recomputes S0.
+- **Real CLI proof, `BcrjhdSUv4Y`, no spend:** the new key differs from the
+  stored one, so the fix costs one recompute. A pre-S5 stage list re-keyed
+  S0–S3 (S3 143.01 s). Then `maclips run <url> --from S5 --language en
+  --clip-class general-own` showed S0, S1, S2 and S3 all `cached`. S5 gated
+  on a stubbed malformed reply without sending a request (4.88 s wall). Logs
+  are in `work/session-20260925a/phase1-*.log`.
 
 ### 5.2d Brief extraction fix, 2026-09-23 [V]
 

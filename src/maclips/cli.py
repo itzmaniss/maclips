@@ -288,7 +288,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
             print(f"FAILED\n{exc}", file=sys.stderr)
             return 2
         source = record.audio_source
-        source_record = record.as_dict()
+        # S0's cache key hashes this. `video_path` is None when the video is
+        # still downloading and set when both streams were already on disk, so
+        # keeping it made the same source miss its own cache (§5.2g). S6 reads
+        # the video from the live record in `shared`, not from here.
+        source_record = {k: v for k, v in record.as_dict().items() if k != "video_path"}
     else:
         source = Path(args.source).expanduser().resolve()
         if not source.is_file():
