@@ -44,7 +44,9 @@ def render_review(manifest_path, diagnostic_finals=0):
         state['progress']={r.id:r.__dict__ for r in report.records}
         conn.execute('UPDATE sources SET state_json=? WHERE id=?',(json.dumps(state),sid))
     finals = []
-    for c in candidates[:diagnostic_finals]:
+    from .tracking import effective_candidate
+    for original in candidates[:diagnostic_finals]:
+        c=effective_candidate(ctx,original)
         plans = ctx.output('S7')['plans'][str(c['rank'])]
         name = next(iter(plans))
         try:

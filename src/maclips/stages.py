@@ -1,13 +1,8 @@
-"""S0-S14 from PLAN.md §2.1, as stubs.
+"""Pipeline stages and hard gates from PLAN.md §2.1.
 
-Every stage body is a placeholder that returns plausible output so the pipeline
-runs end to end (build step 1's "done when"). What is *not* stubbed is the
-gates: each gate condition from §2.1 is implemented against the stage's output
-and the run config, so the gate machinery is real and testable now. Replacing
-a stub means deleting its placeholder output and keeping its gate.
-
-Build order (PLAN.md §8): S2-S4 land in step 2, S1 in step 3, S5 in step 4,
-S8-S14 in step 5, S6 in step 6, S7 in step 7.
+S6 detects face rectangles; S7 plans static layouts without speaker attribution.
+S9 requires persisted human approval. S10 generates no commentary while
+general-3p remains deferred. Real-source acceptance is recorded in PLAN.md.
 """
 from __future__ import annotations
 
@@ -399,7 +394,7 @@ def _brief_block(brief: dict) -> str:
 # --------------------------------------------------------------------------- #
 
 def s6_visual_analysis(ctx: RunContext) -> StageOutput:
-    """scdet shots + Apple Vision faces/landmarks at ~5 fps, candidate windows only.
+    """scdet shots + Apple Vision face rectangles at ~5 fps, candidate windows only.
 
     First point in the pipeline that needs pixels, and therefore the first that
     must wait for the video stream. S0 downloads audio and video separately so
@@ -430,20 +425,32 @@ def s6_visual_analysis(ctx: RunContext) -> StageOutput:
     video_path = locals().get("video")
     if video_path is None:
         video_path = Path(ctx.output("S0").get("video_path") or ctx.source)
-    # Face tracking lands in step 6. Persist media for cached downstream stages.
-    # A candidate with no face track is not a run-stopper;
-    # it is restricted to letterbox, per §2.1.
-    return {"tracks": {}, "shots": [], "letterbox_only": [],
-            "video_path": str(video_path), "audio_path": str(ctx.source), **STUB}
+    from .vision import analyze_window, VisionError
+    from .tracking import effective_candidate
+    analysis={}
+    for original in ctx.output("S5")["candidates"]:
+        candidate=effective_candidate(ctx,original)
+        cid=str(candidate["rank"])
+        try:
+            result=analyze_window(video_path,candidate["start"],candidate["end"],ctx.workdir/"face-checks"/cid)
+        except VisionError as exc:
+            raise GateFailure("S6",f"candidate {cid}: {exc}") from exc
+        analysis[cid]=result
+        print(f"S6 candidate {cid}: {result['frames_processed']} frames, "
+              f"{len(result['tracks'])} tracks / {len(result['shots'])} shots, {result['wall_s']:.2f}s",flush=True)
+    return {"analysis":analysis,"tracks":{k:v["tracks"] for k,v in analysis.items()},
+            "shots":{k:v["shots"] for k,v in analysis.items()},
+            "letterbox_only":[k for k,v in analysis.items() if not v["tracks"]],
+            "frames_processed":sum(v["frames_processed"] for v in analysis.values()),
+            "wall_s":sum(v["wall_s"] for v in analysis.values()),
+            "video_path":str(video_path),"audio_path":str(ctx.source)}
 
 
 def s7_attribution(ctx: RunContext) -> StageOutput:
-    """Speaker attribution and layout planning."""
-    # STUB: build step 7, and only if the business gate G1 passes.
-    return {"plans": {str(c["rank"]): {
-        "centre": {"kind": "centre"}, "letterbox": {"kind": "letterbox"}}
-        for c in ctx.output("S5")["candidates"]},
-        "follow_crop_blocked": [c["rank"] for c in ctx.output("S5")["candidates"]]}
+    """Static per-shot layouts only; speaker attribution remains deferred."""
+    from .layouts import plan_layouts
+    return {"plans":plan_layouts(ctx.output("S6")["analysis"]),
+            "follow_crop_blocked":[c["rank"] for c in ctx.output("S5")["candidates"]]}
 
 
 # --------------------------------------------------------------------------- #
@@ -534,13 +541,13 @@ STAGES: tuple[StageSpec, ...] = (
               params=("expected_speaker_count", "full_diarization"),
               gate="Speakers holding >=5% of speaking time differ from the expected count"),
     StageSpec("S6", "visual-analysis", "scdet shots + Vision face tracks", s6_visual_analysis,
-              needs=("S4",), version=2,
+              needs=("S4",), version=3,
               gate="Video stream did not finish downloading; candidate with no face track is letterbox-only"),
-    StageSpec("S7", "attribution", "Speaker attribution + layout plans", s7_attribution,
-              needs=("S6",), version=2,
+    StageSpec("S7", "attribution", "Static shot layouts; attribution deferred", s7_attribution,
+              needs=("S6",), version=3,
               gate="Low attribution confidence blocks follow-crop for that clip"),
     StageSpec("S8", "proxy-render", "540x960 videotoolbox previews", s8_proxy_render,
-              needs=("S7",), version=2, gate=""),
+              needs=("S7",), version=3, gate="Posted clips cannot be regenerated"),
     StageSpec("S9", "review", "Human selection and trimming", s9_review,
               needs=("S8",), params=("approvals",), gate="Human gate by definition"),
     StageSpec("S10", "commentary", "Resolve commentary text", s10_commentary,

@@ -41,7 +41,9 @@ def no_models(monkeypatch, tmp_path):
             for i, (s, e) in enumerate(spans)
         ]
 
-    from maclips import config, render, export
+    from maclips import config, render, export, vision, layouts
+    monkeypatch.setattr(vision,"analyze_window",lambda *args:{"frames_processed":1,"tracks":[],"shots":[],"wall_s":0})
+    monkeypatch.setattr(layouts,"plan_layouts",lambda analysis:{k:{"centre":{"kind":"centre"},"letterbox":{"kind":"letterbox"}} for k in analysis})
     monkeypatch.setattr(config,"DB_PATH",tmp_path/"tracking.db")
     # These orchestration tests isolate downstream services. Their real rules,
     # persistence and artifact gates are covered by test_compliance/tracking.
@@ -127,7 +129,7 @@ def test_second_end_to_end_run_is_fully_cached(tmp_path, tiny_av):
 
 def test_every_declared_gate_is_documented():
     gateless = {s.id for s in STAGES if not s.gate}
-    assert gateless == {"S2", "S8", "S13"}
+    assert gateless == {"S2", "S13"}
 
 
 def test_s3_gate_text_states_the_real_threshold():

@@ -34,8 +34,16 @@ def record_preview(ctx,candidate,layout,result):
     with db.connect(config.DB_PATH) as conn:
         row=conn.execute('SELECT * FROM clips WHERE source_id=? AND candidate_key=?',
                          (sid,candidate_key(candidate))).fetchone()
-        data=json.loads(row['data_json']); data.setdefault('previews',{})[layout]=result
-        data.setdefault('layout',layout)
+        data=json.loads(row['data_json'])
+        available=ctx.output('S7')['plans'][str(candidate['rank'])]
+        data['previews']={k:v for k,v in data.get('previews',{}).items() if k in available}
+        data['previews'][layout]=result
+        if data.get('layout') not in available:
+            data['layout']=layout
+        # A regenerated preview may change framing even when its layout name stays.
+        data['revision']=data.get('revision',0)+1
+        conn.execute('UPDATE clips SET review_decision=NULL,render_path=NULL WHERE id=?',(row['id'],))
+        conn.execute("DELETE FROM posts WHERE clip_id=? AND status='draft'",(row['id'],))
         conn.execute('UPDATE clips SET data_json=?,layout=? WHERE id=?',(json.dumps(data),data['layout'],row['id']))
         if not conn.execute("SELECT 1 FROM time_log WHERE source_id=? AND event='first_preview'",(sid,)).fetchone():
             db.log_event(conn,'first_preview',sid,row['id'])
@@ -59,7 +67,12 @@ def approved_clips(ctx):
 
 
 def effective_candidate(ctx,candidate):
-    sid=ctx.shared.get('source_id') or register_context(ctx)
+    sid=ctx.shared.get('source_id')
     with db.connect(config.DB_PATH) as conn:
+        if sid is None:
+            from .orchestrator import hash_file
+            source=conn.execute('SELECT id FROM sources WHERE content_hash=?',(hash_file(ctx.source),)).fetchone()
+            if not source: return candidate
+            sid=source[0]
         row=conn.execute('SELECT data_json FROM clips WHERE source_id=? AND candidate_key=?',(sid,candidate_key(candidate))).fetchone()
     return json.loads(row[0]) if row else candidate

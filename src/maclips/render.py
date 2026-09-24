@@ -49,7 +49,8 @@ def _text(value: object) -> str:
 
 
 def write_ass(path: Path, words: list[dict], start: float, end: float,
-              hook: str, split: bool = False, diagnostic: bool = False) -> None:
+              hook: str, split: bool = False, diagnostic: bool = False,
+              segments: list[dict] | None = None) -> None:
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -77,7 +78,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         for selected, (a, b, _) in enumerate(phrase):
             text = " ".join(("{\\c&H00FFFF&}" + w + "{\\c&HFFFFFF&}")
                             if i == selected else w for i, (_, _, w) in enumerate(phrase))
-            lines.append(f"Dialogue: 0,{_ass_time(a)},{_ass_time(b)},Caption,,0,0,0,,{text}\n")
+            spans = [(a, b, 880 if split else 230)] if not segments else [
+                (max(a, segment["start"]-start), min(b, segment["end"]-start),
+                 880 if segment["kind"] == "split" else 230)
+                for segment in segments if segment["end"] > start+a and segment["start"] < start+b]
+            for left, right, margin in spans:
+                if right > left:
+                    lines.append(f"Dialogue: 0,{_ass_time(left)},{_ass_time(right)},Caption,,0,0,{margin},,{text}\n")
     if hook:
         lines.append(f"Dialogue: 1,0:00:00.00,{_ass_time(min(3, end-start))},Hook,,0,0,0,,{_text(hook)}\n")
     if diagnostic:
@@ -101,6 +108,60 @@ def _crop(cx: float, aspect: float, width: int, height: int) -> str:
     return f"crop={crop_width}:{height}:{x}:0"
 
 
+
+def clipped_segments(segments: list[dict], start: float, end: float) -> list[dict]:
+    """Allow trimming inside a saved plan, but never leave a gap or overlap."""
+    if not isinstance(segments, list) or not segments:
+        raise RenderError("layout segments must be a nonempty list")
+    clipped = []
+    previous = None
+    for segment in segments:
+        if not isinstance(segment, dict):
+            raise RenderError("invalid layout segment")
+        a, b = _number(segment.get("start"), "segment start"), _number(segment.get("end"), "segment end")
+        if a < 0 or b <= a or (previous is not None and a < previous-1e-6):
+            raise RenderError("layout segments overlap or are unordered")
+        previous = b
+        if segment.get("kind") not in {"face-centred", "split", "letterbox", "centre", "centre-crop"}:
+            raise RenderError("unknown segment layout")
+        a, b = max(a, start), min(b, end)
+        if b > a:
+            clipped.append({**segment, "start": a, "end": b})
+    cursor = start
+    for segment in clipped:
+        if abs(segment["start"]-cursor) > 1e-6:
+            raise RenderError("layout segments do not cover clip continuously")
+        cursor = segment["end"]
+    if abs(cursor-end) > 1e-6:
+        raise RenderError("layout segments do not cover clip continuously")
+    return clipped
+
+
+def _segment_graph(segments: list[dict], start: float, width: int, height: int,
+                   ow: int, oh: int) -> str:
+    count = len(segments)
+    graph = "[0:v]split=" + str(count) + "".join(f"[source{i}]" for i in range(count)) + ";"
+    for i, segment in enumerate(segments):
+        graph += f"[source{i}]trim=start={segment['start']-start:.6f}:end={segment['end']-start:.6f},setpts=PTS-STARTPTS"
+        kind = segment["kind"]
+        if kind == "letterbox":
+            graph += f",scale={ow}:{oh}:force_original_aspect_ratio=decrease,pad={ow}:{oh}:(ow-iw)/2:(oh-ih)/2:black"
+        elif kind == "split":
+            boxes = segment.get("boxes", [])
+            if len(boxes) != 2:
+                raise RenderError("split layout requires exactly two face boxes")
+            centres = sorted(_centre(box) for box in boxes)
+            graph += f",split=2[top{i}][bottom{i}];"
+            graph += f"[top{i}]{_crop(centres[0],1080/960,width,height)},scale={ow}:{oh//2}[t{i}];"
+            graph += f"[bottom{i}]{_crop(centres[1],1080/960,width,height)},scale={ow}:{oh//2}[b{i}];[t{i}][b{i}]vstack=inputs=2"
+        else:
+            cx = _number(segment.get("x", .5), "face centre") if kind == "face-centred" else .5
+            if not 0 <= cx <= 1:
+                raise RenderError("face centre lies outside source")
+            graph += f",{_crop(cx,9/16,width,height)},scale={ow}:{oh}"
+        graph += f",setsar=1[segment{i}];"
+    return graph + "".join(f"[segment{i}]" for i in range(count)) + f"concat=n={count}:v=1:a=0"
+
 def render_clip(video: Path, audio: Path, candidate: dict, words: list[dict],
                 layout: dict | str, out_path: Path, *, proxy: bool = True,
                 diagnostic: bool = False) -> dict:
@@ -119,6 +180,7 @@ def render_clip(video: Path, audio: Path, candidate: dict, words: list[dict],
     if outpath in (video, audio):
         raise RenderError("output may not replace an original input")
     duration = end - start
+    segments = clipped_segments(plan["segments"], start, end) if "segments" in plan else None
     begun = time.perf_counter()
     try:
         source = ffmpeg.probe(video)
@@ -127,7 +189,9 @@ def render_clip(video: Path, audio: Path, candidate: dict, words: list[dict],
             raise RenderError("source has no usable video stream")
         ow, oh = (540, 960) if proxy else (1080, 1920)
         base = f"[0:v]trim=duration={duration:.6f},setpts=PTS-STARTPTS"
-        if kind == "letterbox":
+        if segments:
+            vf = _segment_graph(segments, start, width, height, ow, oh)
+        elif kind == "letterbox":
             vf = base + f",scale={ow}:{oh}:force_original_aspect_ratio=decrease,pad={ow}:{oh}:(ow-iw)/2:(oh-ih)/2:black"
         elif kind == "split":
             boxes = plan.get("boxes", [])
@@ -146,7 +210,7 @@ def render_clip(video: Path, audio: Path, candidate: dict, words: list[dict],
         # Keep subtitle paths shell/filter-safe even if the user output path is not.
         with tempfile.TemporaryDirectory(prefix="maclips-render-") as scratch:
             ass = Path(scratch) / "captions.ass"
-            write_ass(ass, words, start, end, candidate.get("hook_text", ""), kind == "split", diagnostic)
+            write_ass(ass, words, start, end, candidate.get("hook_text", ""), kind == "split", diagnostic, segments)
             vf += f",setsar=1,ass=filename='{ass}'[v];"
             vf += f"[1:a]atrim=duration={duration:.6f},asetpts=PTS-STARTPTS,loudnorm=I=-14:TP=-1.5:LRA=11[a]"
             fd, temporary = tempfile.mkstemp(prefix=".render-", suffix=".mp4", dir=outpath.parent)

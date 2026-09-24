@@ -129,7 +129,7 @@ Each stage checkpoints its output and is cached by content hash (source hash + s
 | S3 | **Transcribe + align** (`whispermlx`) | Word-level timestamped transcript, each word carrying an alignment score | **Weakly-aligned words** (interpolated, unaligned, or scoring below the floor) above 12% at `min_score = 0.10` — see §2.7; detected language ≠ expected |
 | S4 | **Diarize** (pyannote community-1, exclusive mode) — **runs after S5, on candidate windows only** (each span ± 10 s), one pipeline reused across windows. In-memory waveform, never a path (§2.4) | Speaker-labelled words **within each window**; labels do not carry across windows | **Speakers holding ≥5% of the window's speaking time** differ from the expected count → stop and ask you to confirm |
 | S5 | **Rank** (Sonnet) with brief constraints | Candidate list: word-index spans, hook, rationale | Malformed JSON after one retry; fewer than 5 valid candidates after snapping and duration filtering |
-| S6 | **Visual analysis** on candidate windows only: shot boundaries (ffmpeg `scdet`), Apple Vision faces and mouth landmarks at ~5 fps, per-shot IoU tracking. **First stage needing pixels, so the first that waits for the video stream.** | Face tracks per shot | Video stream did not finish downloading; a candidate with no face track at all → that candidate gets letterbox layout only |
+| S6 | **Visual analysis** on candidate windows only: shot boundaries (ffmpeg `scdet`), Apple Vision face rectangles at ~5 fps, per-shot IoU tracking. Mouth landmarks/signal remain deferred to step 7. **First stage needing pixels, so the first that waits for the video stream.** | Face tracks per shot | Video stream did not finish downloading; a candidate with no face track at all → that candidate gets letterbox layout only |
 | S7 | **Speaker attribution + layout planning** | Per-clip crop plans: follow-crop, split-screen | Attribution confidence below threshold on more than X% of clip duration → **follow-crop blocked for that clip** (split or letterbox only) |
 | S8 | **Proxy render**: 540×960, `h264_videotoolbox`, captions burned, all available layouts | Preview files | — |
 | S9 | **Review** (you) | Approved clips: in/out, layout, hook text, commentary choice | Human gate by definition |
@@ -695,8 +695,8 @@ a different measure than this one.
 | `faster-whisper`, Haar cascade, OpenCV video writer, two-pass encode | **Deleted** | — |
 | Diarization + word merge | **Built** | pyannote community-1. |
 | Brief extraction, schema, confirm form | **Built** | — |
-| Vision face tracking (pyobjc → Apple Vision) | **Planned; stub only** | Step 6. |
-| Speaker attribution, layout planner | **Planned; stub only** | Step 7, the core of §4. |
+| Vision face tracking (pyobjc → Apple Vision) | **Built [V]** | Candidate-only rectangles, scdet shots, per-shot IoU; benchmark exercised through render-review CLI. No landmarks or mouth signal. Second source blocked at S5. |
+| Speaker attribution, layout planner | **Static layouts built [V]; attribution deferred** | Face-centred per shot, left-in-source above right in split-screen, letterbox fallback. Speaking attribution/follow-crop remain step 7. |
 | One-pass final renderer | **Built [V]** | Step 5: original split inputs, ASS word highlights, hook, loudnorm; S8 centre/letterbox previews and S12 renderer. Diagnostic CLI exercised; human-approved S12 path pending. |
 | Web UI (Ingest / Review / Posted) | **Built [V]** | FastAPI/Jinja2/vanilla JS, `maclips serve`; real browser tabs/playback/trim checked. Confirmation, approval and posting remain user actions. |
 | SQLite tracking, export bundles | **Built [V]** | Sources/clips/timing written by real CLI. Compliance, bundle and post persistence exercised with fixtures; real posting awaits human actions. |
@@ -1606,7 +1606,7 @@ This gives three numbers per source:
 
 ### 6.5 Render measurements, session 2026-09-23g [V]
 
-Phase 1 builds the S8/S12 renderer, not the Review UI or compliance yet.
+Phase 1 built the S8/S12 renderer; later phases below add UI and compliance.
 `maclips render-review work/session-20260923g/benchmark-manifest.json
 --diagnostic-finals 2` imports verified word-index candidates, runs the media
 handoff and static layout planner, then S8. It does not claim to rerun S0–S5.
@@ -1670,6 +1670,65 @@ the user confirms a real campaign, approves clips and posts them.
 Timing events are persisted automatically; displayed elapsed review time
 explicitly includes time away. Active human effort and earnings are not yet
 measured and must not be claimed from these diagnostic sessions.
+
+**Phase 4 [V], measured 2026-09-24.** The real `render-review` CLI imported
+the same A1 candidates and ran S6→S8, preserving the user's candidate-1 trim.
+Apple Vision processed **4,788 frames** at a sampling rate of 5 fps within
+the 12 candidate windows. Sum of window analysis times: **499.84 s**
+(**9.58 frames/s** including extraction/check images); complete S6 stage:
+**500.58 s**. S8 rendered **24 previews in 127.52 s**. Primary plans:
+**3 split, 9 face-centred, 0 letterbox-only**; all 12 also offer letterbox.
+Plans switch static crops only at detected shot boundaries. No attribution,
+mouth signal or follow-crop was computed.
+
+Retained tracks per shot, in shot order [V]:
+
+| Candidate | Frames | Tracks per shot | Primary layout |
+|---|---:|---|---|
+| 1 | 419 | 1,1,1,1,4,1 | split |
+| 2 | 427 | 1,1,1,1,1,3,1,0 | split |
+| 3 | 378 | 0,1,1,1,1,1 | face-centred |
+| 4 | 445 | 0,1,1,1,1,1,1,1,1,0,1 | face-centred |
+| 5 | 453 | 0,1,1,1,1,1 | face-centred |
+| 6 | 366 | 1,1,1,1,1,1,1,1,1,0 | face-centred |
+| 7 | 472 | 0,1,1,1,1 | face-centred |
+| 8 | 72 | 2,0 | face-centred |
+| 9 | 369 | 1,2,1,1 | face-centred |
+| 10 | 742 | 1,1,3,1,1,1,1,1,1,0 | split |
+| 11 | 208 | 1 | face-centred |
+| 12 | 437 | 1,1,1,1 | face-centred |
+
+For 3+ tracks the two longest-duration tracks substitute for “most-speaking”
+**[I, implementation choice]**, pending step 7. Two tracks must coexist for
+at least one second to establish a split; disjoint fragments use the longest
+single track **[I]**. No retained tracks in a shot produces letterbox for that
+shot. Tracks shorter than one second are dropped. Check images expose face
+rectangles and shot indices for human inspection.
+
+Two split finals ran through the diagnostic CLI: planned **83.767 / 85.313 s**,
+ffprobe **83.800 / 85.400 s**, render wall **19.341 / 20.184 s**. An additional
+face-centred final used the renderer directly: planned **94.425 s**, actual
+**94.500 s**, wall **10.268 s**. All are **1080×1920 with audio**, diagnostic
+watermarked, unapproved and not exported. A sampled split frame shows the
+left-in-source person above the right; full preview correctness is **[U]**
+until the user judges it. Playwright also loaded the updated Review player.
+
+Evidence: `work/session-20260923g/vision-measurements.json`,
+`benchmark-face-renders/{previews,diagnostic,face-checks}/`,
+`vision-cli.log`, `face-final-receipt.json`, `ui-face-*.png`.
+Regression gates cover segment gaps/overlaps, missing frames, shot-local
+association, minimum track duration, and output duration/resolution/audio.
+Regenerating a preview revokes earlier approval even when its layout name
+is unchanged; posted clips cannot be regenerated.
+
+**Timing correction [V]:** S6 plus previews alone took **628.10 s (10.47 min)**,
+so the earlier approximately six-minute remaining preview budget does not
+cover this implementation's visual analysis plus previews. This is not a
+measured end-to-end campaign time; no throughput target is claimed achieved.
+**Blocked [V]:** the second source has no valid S5 candidates (§5.2f), so no
+second-source face run or sheet was fabricated. Step 6's two-source/user
+acceptance remains pending. All campaign confirmation, approval, disclosure
+and posting actions remain with the user.
 
 ## 7. Campaign workflow
 
@@ -1756,7 +1815,10 @@ Each step has a "done when". Arrows show what it blocks.
 
 **Session g status [V]:** step 5 render core built and run on real candidates;
 Review UI built and browser-smoked; human end-to-end campaign acceptance pending. Step 8 mechanical
-checks built and fixture-tested [V]; step 6 awaits face tracking and user judgment.
+checks built and fixture-tested [V]; semantic and unrepresentable brief rules
+remain human checks. Step 6 face tracking and static shot layouts are built
+and run on the benchmark [V]; second-source execution and user judgment remain
+pending [U]. Steps 5 and 6 are not declared accepted end to end.
 
 **Critical path to first earnings:** 1 → 2 → 4 → 5 → 6, with 3 and 8 in parallel.
 

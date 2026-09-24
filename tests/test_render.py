@@ -105,3 +105,48 @@ def test_split_left_person_is_top_and_captions_at_seam(tmp_path, monkeypatch):
 def test_face_crop_clamps_to_source_edge():
     assert render._crop(0, 9/16, 2560, 1280) == "crop=720:1280:0:0"
     assert render._crop(1, 9/16, 2560, 1280) == "crop=720:1280:1840:0"
+
+
+@pytest.mark.parametrize("segments", [
+    [{"start":10,"end":15,"kind":"letterbox"},{"start":16,"end":20,"kind":"letterbox"}],
+    [{"start":10,"end":16,"kind":"letterbox"},{"start":15,"end":20,"kind":"letterbox"}],
+    [{"start":11,"end":20,"kind":"letterbox"}],
+    [{"start":10,"end":19,"kind":"letterbox"}],
+    [{"start":10,"end":float('nan'),"kind":"letterbox"}],
+])
+def test_segment_gaps_overlaps_uncovered_and_nonfinite_stop(segments):
+    with pytest.raises(render.RenderError):
+        render.clipped_segments(segments, 10, 20)
+
+
+def test_saved_segments_clip_to_new_word_bounds():
+    saved=[{"start":10,"end":15,"kind":"letterbox"},{"start":15,"end":20,"kind":"face-centred","x":.3}]
+    clipped=render.clipped_segments(saved,12,18)
+    assert [(s['start'],s['end']) for s in clipped] == [(12,15),(15,18)]
+    assert saved[0]['start'] == 10
+
+
+def test_segment_graph_uses_trim_concat_and_single_overlay(tmp_path, monkeypatch):
+    source=tmp_path/'source.mp4';source.touch()
+    commands=[]
+    monkeypatch.setattr(render.ffmpeg,'probe',lambda path: info(width=2560,height=1280) if path==source else info())
+    def run(cmd):
+        commands.append(cmd);Path(cmd[-1]).write_bytes(b'media')
+    monkeypatch.setattr(render.ffmpeg,'_run',run)
+    plan={'kind':'split','segments':[{'start':100,'end':105,'kind':'letterbox'},
+          {'start':105,'end':112,'kind':'split','boxes':[[.1,.2,.1,.2],[.7,.2,.1,.2]]}]}
+    render.render_clip(source,source,{'start':100,'end':112},[],plan,tmp_path/'out.mp4',proxy=False)
+    graph=commands[0][commands[0].index('-filter_complex')+1]
+    assert 'trim=start=0.000000:end=5.000000' in graph
+    assert 'trim=start=5.000000:end=12.000000' in graph
+    assert 'concat=n=2:v=1:a=0' in graph
+    assert graph.count('ass=filename') == graph.count('loudnorm=') == 1
+
+
+def test_caption_crossing_shot_cut_changes_position(tmp_path):
+    path=tmp_path/'caption.ass'
+    render.write_ass(path,[{'word':'hello','start':11,'end':13}],10,14,'',segments=[
+        {'start':10,'end':12,'kind':'letterbox'}, {'start':12,'end':14,'kind':'split'}])
+    text=path.read_text()
+    assert '0:00:01.00,0:00:02.00,Caption,,0,0,230,,' in text
+    assert '0:00:02.00,0:00:03.00,Caption,,0,0,880,,' in text

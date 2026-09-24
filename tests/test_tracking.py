@@ -65,3 +65,35 @@ def test_rerender_uses_persisted_trim(tmp_path,monkeypatch):
         conn.execute('UPDATE clips SET data_json=? WHERE id=?',(json.dumps(edited),cid))
     ctx=RunContext('test',tmp_path/'source','abc',tmp_path,{},shared={'source_id':sid})
     assert tracking.effective_candidate(ctx,original)==edited
+
+
+def test_regenerated_same_layout_revokes_approval(tmp_path,monkeypatch):
+    from maclips import tracking
+    monkeypatch.setattr(config,'DB_PATH',tmp_path/'test.db')
+    candidate={'rank':1,'start_word':0,'end_word':20,'start':0,'end':30}
+    with db.connect(config.DB_PATH) as conn:
+        sid=db.register_source(conn,'abc','source','general-own')
+        cid=db.save_candidate(conn,sid,'general-own',candidate,{'split':{'path':'old'}})
+        data=json.loads(conn.execute('SELECT data_json FROM clips WHERE id=?',(cid,)).fetchone()[0]);data['layout']='split'
+        conn.execute("UPDATE clips SET review_decision='approved',render_path='old-final',data_json=? WHERE id=?",(json.dumps(data),cid))
+    ctx=RunContext('test',tmp_path/'source','abc',tmp_path,{},outputs={'S7':{'plans':{'1':{'split':{'kind':'split'}}}}},shared={'source_id':sid})
+    tracking.record_preview(ctx,candidate,'split',{'path':'new'})
+    with db.connect(config.DB_PATH) as conn:
+        row=conn.execute('SELECT * FROM clips WHERE id=?',(cid,)).fetchone()
+        assert row['review_decision'] is None and row['render_path'] is None
+        assert json.loads(row['data_json'])['revision']==1
+
+
+def test_posted_clip_blocks_preview_regeneration(tmp_path,monkeypatch):
+    from maclips import tracking,render_stages,render
+    monkeypatch.setattr(config,'DB_PATH',tmp_path/'test.db')
+    candidate={'rank':1,'start_word':0,'end_word':20,'start':0,'end':30}
+    with db.connect(config.DB_PATH) as conn:
+        sid=db.register_source(conn,'abc','source','general-own')
+        cid=db.save_candidate(conn,sid,'general-own',candidate)
+        conn.execute("INSERT INTO posts(clip_id,platform,account,status,post_url) VALUES(?,'instagram','fixture','posted','https://example.test/post')",(cid,))
+    ctx=RunContext('test',tmp_path/'source','abc',tmp_path,{},outputs={'S6':{},'S3':{'words':[]},'S5':{'candidates':[candidate]}},shared={'source_id':sid})
+    monkeypatch.setattr(tracking,'register_context',lambda ctx:sid)
+    monkeypatch.setattr(render,'render_clip',lambda *a,**kw:pytest.fail('posted clip rendered'))
+    with pytest.raises(GateFailure,match='posted clip is immutable'):
+        render_stages.proxy_render(ctx)

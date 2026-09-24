@@ -9,11 +9,18 @@ def proxy_render(ctx):
     media = ctx.output('S6')
     words = ctx.output('S3')['words']
     from .tracking import register_context, record_preview, effective_candidate
-    register_context(ctx)
+    source_id = register_context(ctx)
     previews = {}
     started = time.perf_counter()
     for original in ctx.output('S5')['candidates']:
         candidate = effective_candidate(ctx, original)
+        from . import db, config
+        from .tracking import candidate_key
+        with db.connect(config.DB_PATH) as conn:
+            posted=conn.execute('SELECT 1 FROM posts p JOIN clips c ON c.id=p.clip_id WHERE c.source_id=? AND c.candidate_key=? AND p.post_url IS NOT NULL',
+                                (source_id,candidate_key(original))).fetchone()
+        if posted:
+            raise GateFailure('S8','posted clip is immutable; cannot regenerate its previews')
         cid = str(candidate['rank'])
         previews[cid] = {}
         for name, layout in ctx.output('S7')['plans'][cid].items():

@@ -215,11 +215,21 @@ def edit_clip(cid,payload):
     layout=payload.get('layout') or data.get('layout') or next(iter(data['previews']))
     plans=state['plans'][str(data['rank'])]
     if layout not in plans: raise ValueError('layout unavailable')
+    segments=plans[layout].get('segments')
+    if segments and (a<segments[0]['start'] or b>segments[-1]['end']):
+        from .vision import analyze_window
+        from .layouts import plan_layouts
+        analysis=analyze_window(state['video'],a,b,Path(state['workdir'])/'face-checks'/f"{data['rank']}-edit-{data.get('revision',0)+1}")
+        plans=plan_layouts({str(data['rank']):analysis})[str(data['rank'])]
+        if layout not in plans:
+            raise ValueError('new span has different face availability; choose letterbox and retry')
+        state['plans'][str(data['rank'])]=plans
     path=Path(state['workdir'])/'previews'/f"{data['rank']}-{layout}.mp4"
     result=render_clip(Path(state['video']),Path(state['audio']),data,words,plans[layout],path,proxy=True)
     # Other layouts now refer to stale boundaries; they are regenerated on demand.
     data['previews']={layout:result};data['layout']=layout;data['revision']=data.get('revision',0)+1
     with db.connect(config.DB_PATH) as conn:
+        conn.execute('UPDATE sources SET state_json=? WHERE id=?',(json.dumps(state),source['id']))
         conn.execute('UPDATE clips SET start_word=?,end_word=?,start_s=?,end_s=?,hook_text=?,layout=?,data_json=?,review_decision=NULL,review_reason=NULL,render_path=NULL WHERE id=?',
                      (start,end,a,b,data['hook_text'],layout,json.dumps(data),cid))
         conn.execute("DELETE FROM posts WHERE clip_id=? AND status='draft'",(cid,))
