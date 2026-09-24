@@ -216,13 +216,19 @@ def run_pipeline(
     their checkpoints.
     """
     report = RunReport(run_id=ctx.run_id)
+    def publish(record):
+        report.records.append(record)
+        callback=ctx.shared.get("on_stage")
+        if callback:
+            callback(record.__dict__)
+
     keys: dict[str, str] = {}
     forcing = False
     stopped = False
 
     for spec in stages:
         if stopped:
-            report.records.append(StageRecord(spec.id, spec.name, "blocked"))
+            publish(StageRecord(spec.id, spec.name, "blocked"))
             continue
 
         if from_stage is not None and spec.id == from_stage:
@@ -234,14 +240,17 @@ def run_pipeline(
         cached = None if forcing else read_checkpoint(ctx, spec, key)
         if cached is not None:
             ctx.outputs[spec.id] = cached
-            report.records.append(StageRecord(spec.id, spec.name, "cached", key))
+            publish(StageRecord(spec.id, spec.name, "cached", key))
             continue
 
+        callback=ctx.shared.get("on_stage")
+        if callback:
+            callback(StageRecord(spec.id,spec.name,"running",key).__dict__)
         started = time.perf_counter()
         try:
             output = spec.run(ctx)
         except GateFailure as gate:
-            report.records.append(
+            publish(
                 StageRecord(
                     spec.id, spec.name, "gated", key, gate.reason,
                     time.perf_counter() - started,
@@ -253,6 +262,6 @@ def run_pipeline(
         elapsed = time.perf_counter() - started
         ctx.outputs[spec.id] = output
         write_checkpoint(ctx, spec, key, output)
-        report.records.append(StageRecord(spec.id, spec.name, "ran", key, "", elapsed))
+        publish(StageRecord(spec.id, spec.name, "ran", key, "", elapsed))
 
     return report

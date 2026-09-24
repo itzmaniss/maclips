@@ -59,8 +59,10 @@ def no_models(monkeypatch, tmp_path):
     monkeypatch.setattr(export,"export_stage",lambda ctx:{"bundles":[]})
     monkeypatch.setattr(export,"post_stage",fake_post)
     from maclips import tracking
+    monkeypatch.setattr(tracking,"approved_clips",lambda ctx:list(ctx.config.get("approvals",[]) or []))
     monkeypatch.setattr(tracking,"register_context",lambda ctx:1)
     monkeypatch.setattr(tracking,"record_preview",lambda *args:None)
+    monkeypatch.setattr(tracking,"effective_candidate",lambda ctx,candidate:candidate)
     def fake_render(video, audio, candidate, words, layout, out_path, **kwargs):
         return {"path": str(out_path), "planned_duration_s": candidate["end"]-candidate["start"],
                 "actual_duration_s": candidate["end"]-candidate["start"],

@@ -37,6 +37,12 @@ def render_review(manifest_path, diagnostic_finals=0):
         return 2
     from .tracking import import_previews
     import_previews(ctx)
+    from . import db, config
+    with db.connect(config.DB_PATH) as conn:
+        sid=ctx.shared['source_id']
+        state=json.loads(conn.execute('SELECT state_json FROM sources WHERE id=?',(sid,)).fetchone()[0])
+        state['progress']={r.id:r.__dict__ for r in report.records}
+        conn.execute('UPDATE sources SET state_json=? WHERE id=?',(json.dumps(state),sid))
     finals = []
     for c in candidates[:diagnostic_finals]:
         plans = ctx.output('S7')['plans'][str(c['rank'])]

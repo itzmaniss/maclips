@@ -355,8 +355,8 @@ def s5_rank(ctx: RunContext) -> StageOutput:
             transcript.words,
             llm_fn=call,
             count=int(_cfg(ctx, "candidate_count", 12)),
-            min_duration_s=float(brief.get("min_duration_s") or ranking.DEFAULT_MIN_DURATION_S),
-            max_duration_s=float(brief.get("max_duration_s") or ranking.DEFAULT_MAX_DURATION_S),
+            min_duration_s=float(brief.get("min_duration_s") or _cfg(ctx,"clip_min_duration") or ranking.DEFAULT_MIN_DURATION_S),
+            max_duration_s=float(brief.get("max_duration_s") or _cfg(ctx,"clip_max_duration") or ranking.DEFAULT_MAX_DURATION_S),
             brief_block=_brief_block(brief),
         )
     except ranking.RankingError as exc:
@@ -458,7 +458,8 @@ def s8_proxy_render(ctx: RunContext) -> StageOutput:
 
 def s9_review(ctx: RunContext) -> StageOutput:
     """Human gate by definition: nothing proceeds without approvals."""
-    approvals = list(_cfg(ctx, "approvals", []) or [])
+    from .tracking import approved_clips
+    approvals = approved_clips(ctx)
     if not approvals:
         raise GateFailure("S9", "awaiting review; no clips approved yet.")
     return {"approved": approvals, **STUB}
@@ -526,7 +527,7 @@ STAGES: tuple[StageSpec, ...] = (
     # S5 before S4: diarization is window-only and needs the candidate spans.
     StageSpec("S5", "rank", "Sonnet ranks candidates", s5_rank,
               needs=("S1", "S3"),
-              params=("stub_candidates", "stub_malformed_json", "candidate_count"),
+              params=("stub_candidates", "stub_malformed_json", "candidate_count", "clip_min_duration", "clip_max_duration"),
               gate="Malformed JSON after one retry; fewer than 5 candidates survive"),
     StageSpec("S4", "diarize", "pyannote community-1 on candidate windows", s4_diarize,
               needs=("S5",),

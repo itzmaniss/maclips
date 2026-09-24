@@ -117,7 +117,10 @@ def register_source(conn, content_hash, path, clip_class, campaign_id=None, dura
         raise ValueError("source already belongs to a different class/campaign; do not silently reroute it")
     if row:
         if state is not None:
-            conn.execute("UPDATE sources SET state_json=? WHERE id=?", (json.dumps(state), row["id"]))
+            previous=json.loads(row["state_json"])
+            merged={**previous,**state}
+            merged["experiment_only"]=bool(previous.get("experiment_only") or state.get("experiment_only"))
+            conn.execute("UPDATE sources SET state_json=? WHERE id=?", (json.dumps(merged), row["id"]))
         return row["id"]
     cur = conn.execute("INSERT INTO sources(content_hash,path,clip_class,campaign_id,duration_s,state_json) VALUES(?,?,?,?,?,?)",
                        (content_hash,str(path),clip_class,campaign_id,duration_s,json.dumps(state or {})))

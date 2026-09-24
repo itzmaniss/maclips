@@ -46,3 +46,20 @@ def import_previews(ctx):
     for c in ctx.output('S5')['candidates']:
         for name,result in ctx.output('S8')['previews'].get(str(c['rank']),{}).items():
             record_preview(ctx,c,name,result)
+
+
+def approved_clips(ctx):
+    with db.connect(config.DB_PATH) as conn:
+        source=conn.execute('SELECT * FROM sources WHERE content_hash=?',(ctx.source_hash,)).fetchone()
+        if not source: return []
+        active={candidate_key(c) for c in ctx.output('S5')['candidates']}
+        return [{**json.loads(row['data_json']),'id':row['id']} for row in
+                conn.execute("SELECT * FROM clips WHERE source_id=? AND review_decision='approved'",(source['id'],))
+                if row['candidate_key'] in active]
+
+
+def effective_candidate(ctx,candidate):
+    sid=ctx.shared.get('source_id') or register_context(ctx)
+    with db.connect(config.DB_PATH) as conn:
+        row=conn.execute('SELECT data_json FROM clips WHERE source_id=? AND candidate_key=?',(sid,candidate_key(candidate))).fetchone()
+    return json.loads(row[0]) if row else candidate

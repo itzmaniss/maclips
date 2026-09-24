@@ -8,11 +8,12 @@ def proxy_render(ctx):
     from .render import RenderError, render_clip
     media = ctx.output('S6')
     words = ctx.output('S3')['words']
-    from .tracking import register_context, record_preview
+    from .tracking import register_context, record_preview, effective_candidate
     register_context(ctx)
     previews = {}
     started = time.perf_counter()
-    for candidate in ctx.output('S5')['candidates']:
+    for original in ctx.output('S5')['candidates']:
+        candidate = effective_candidate(ctx, original)
         cid = str(candidate['rank'])
         previews[cid] = {}
         for name, layout in ctx.output('S7')['plans'][cid].items():
@@ -23,7 +24,7 @@ def proxy_render(ctx):
             except RenderError as exc:
                 raise GateFailure('S8', str(exc)) from exc
             previews[cid][name] = result
-            record_preview(ctx,candidate,name,result)
+            record_preview(ctx,original,name,result)
             callback = ctx.shared.get('on_preview')
             if callback:
                 callback(cid, name, result)

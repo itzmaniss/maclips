@@ -304,6 +304,25 @@ def _cmd_run(args: argparse.Namespace) -> int:
     workdir = config.WORK_DIR / source_hash[:16]
     workdir.mkdir(parents=True, exist_ok=True)
 
+    import json
+    from . import db
+    brief=getattr(args,"brief",None) or {}
+    if isinstance(brief,str):
+        brief=json.loads(Path(brief).read_text())
+    campaign_id=getattr(args,"campaign_id",None)
+    with db.connect(config.DB_PATH) as conn:
+        sid=db.register_source(conn,source_hash,source,args.clip_class,campaign_id)
+        saved=conn.execute("SELECT state_json FROM sources WHERE id=?",(sid,)).fetchone()
+        state=json.loads(saved[0]); state.update(origin=args.source,workdir=str(workdir),progress={})
+        conn.execute("UPDATE sources SET state_json=? WHERE id=?",(json.dumps(state),sid))
+        approvals=[{**json.loads(r["data_json"]),"id":r["id"]} for r in conn.execute("SELECT * FROM clips WHERE source_id=? AND review_decision='approved'",(sid,))]
+    def progress(record):
+        with db.connect(config.DB_PATH) as conn:
+            row=conn.execute("SELECT state_json FROM sources WHERE id=?",(sid,)).fetchone()
+            current=json.loads(row[0]);current.setdefault("progress",{})[record["id"]]=record
+            conn.execute("UPDATE sources SET state_json=? WHERE id=?",(json.dumps(current),sid))
+        if getattr(args,"on_stage",None): args.on_stage(record)
+
     ctx = RunContext(
         run_id=run_id,
         source=source,
@@ -311,6 +330,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
         workdir=workdir,
         config={
             "clip_class": args.clip_class,
+            "brief": brief, "campaign_id": campaign_id, "approvals": approvals,
+            "clip_min_duration": getattr(args,"clip_min_duration",None),
+            "clip_max_duration": getattr(args,"clip_max_duration",None),
             "expected_speaker_count": args.expected_speakers,
             "expected_language": args.language,
             "candidate_count": args.candidates,
@@ -318,6 +340,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
             "full_diarization": args.full_diarization,
         },
     )
+    with db.connect(config.DB_PATH) as conn:
+        current=json.loads(conn.execute("SELECT state_json FROM sources WHERE id=?",(sid,)).fetchone()[0])
+        current.update(config=dict(ctx.config),brief=brief)
+        conn.execute("UPDATE sources SET state_json=? WHERE id=?",(json.dumps(current),sid))
+    ctx.shared.update(on_stage=progress,source_id=sid)
     if record is not None:
         # S6 needs this to wait for the video stream; it is an object, not
         # checkpointable state, so it goes in `shared`.
@@ -383,6 +410,9 @@ def main() -> int:
                      help="enables the S4 speaker-count gate")
     run.add_argument("--language", default=None, help="enables the S3 language gate")
     run.add_argument("--candidates", type=int, default=12)
+    run.add_argument("--brief", default=None, help="human-confirmed campaign JSON file")
+    run.add_argument("--clip-min-duration",type=float,default=None)
+    run.add_argument("--clip-max-duration",type=float,default=None)
     run.add_argument("--full-diarization", action="store_true",
                      help="diarize the whole source instead of candidate windows. "
                           "Slow (9m per 2h, measured) and not the default; kept for "
@@ -393,7 +423,13 @@ def main() -> int:
     review.add_argument("--diagnostic-finals", type=int, default=0,
                         help="number of watermarked unapproved final-resolution test renders")
 
+    serve = sub.add_parser("serve",help="open the local Ingest / Review / Posted app")
+    serve.add_argument("--port",type=int,default=8765)
     args = parser.parse_args()
+    if args.command == "serve":
+        import uvicorn
+        uvicorn.run("maclips.web:app",host="127.0.0.1",port=args.port)
+        return 0
     if args.command == "render-review":
         from .review_cli import render_review
         from .orchestrator import GateFailure

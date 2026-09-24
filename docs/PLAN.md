@@ -698,7 +698,7 @@ a different measure than this one.
 | Vision face tracking (pyobjc → Apple Vision) | **Planned; stub only** | Step 6. |
 | Speaker attribution, layout planner | **Planned; stub only** | Step 7, the core of §4. |
 | One-pass final renderer | **Built [V]** | Step 5: original split inputs, ASS word highlights, hook, loudnorm; S8 centre/letterbox previews and S12 renderer. Diagnostic CLI exercised; human-approved S12 path pending. |
-| Web UI (Ingest / Review / Posted) | **Planned** | Step 5; brief confirmation currently uses the CLI. |
+| Web UI (Ingest / Review / Posted) | **Built [V]** | FastAPI/Jinja2/vanilla JS, `maclips serve`; real browser tabs/playback/trim checked. Confirmation, approval and posting remain user actions. |
 | SQLite tracking, export bundles | **Built [V]** | Sources/clips/timing written by real CLI. Compliance, bundle and post persistence exercised with fixtures; real posting awaits human actions. |
 
 **Correction after build step 1 [V].** This table originally listed the
@@ -1647,6 +1647,30 @@ There are **0 real posts**: no real approval or attestation was performed.
 Bundle creation and post writes were exercised only with fixtures. Decision,
 bundle-open and post-URL events are wired to the UI in Phase 3.
 
+**Phase 3 [V].** `uv run maclips serve --port 8765` serves the three tabs
+on 127.0.0.1. Ingest supports URL/local path, confirmed campaigns or an
+editable extracted brief form, arguments, stage status/reasons and rerun.
+Review provides playback, available layouts, ±10 s transcript context,
+word-snapped trim, hook editing, brief checks and J/K/A/R/[/]/L shortcuts.
+Posted provides bundle files, post URL, disclosure attestation, submission
+window timer and status. Heavy work and decisions are serialized; stale
+review revisions stop, rejection revokes draft bundles, and experiment-only
+protection survives re-ingest. No S10 generation or step-7 work was added.
+
+Playwright loaded all three tabs on the real benchmark, played a 540×960
+preview, and changed candidate 1's out word **799 → 798**. Its selected
+preview re-rendered in **7.094 s**; no approval, brief confirmation or
+disclosure box was exercised. Screenshots: `work/session-20260923g/ui-*.png`.
+The first smoke driver used an incorrect Playwright argument after the edit
+was accepted; the corrected driver verified the completed edit, rather than
+issuing another trim. Browser page errors: **0**.
+Fixture tests cover approval→S10–S13→bundle→post persistence and gates.
+Real final export/post and end-to-end campaign acceptance remain **[U]** until
+the user confirms a real campaign, approves clips and posts them.
+Timing events are persisted automatically; displayed elapsed review time
+explicitly includes time away. Active human effort and earnings are not yet
+measured and must not be claimed from these diagnostic sessions.
+
 ## 7. Campaign workflow
 
 ### 7.1 Lifecycle
@@ -1731,7 +1755,7 @@ Each step has a "done when". Arrows show what it blocks.
 | 9 | **Conditional: Light-ASD escalation** (§4.5), only if step 7 misses the threshold after heuristic tuning. | Accuracy clears the threshold, or you accept split-screen as the two-shot default. | — |
 
 **Session g status [V]:** step 5 render core built and run on real candidates;
-Review UI and human end-to-end campaign acceptance pending. Step 8 mechanical
+Review UI built and browser-smoked; human end-to-end campaign acceptance pending. Step 8 mechanical
 checks built and fixture-tested [V]; step 6 awaits face tracking and user judgment.
 
 **Critical path to first earnings:** 1 → 2 → 4 → 5 → 6, with 3 and 8 in parallel.

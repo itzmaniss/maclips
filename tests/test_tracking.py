@@ -45,3 +45,23 @@ def test_fixture_bundle_and_draft_post(tmp_path,monkeypatch):
     with db.connect(config.DB_PATH) as conn:
         assert conn.execute('SELECT status FROM posts').fetchone()[0]=='draft'
         assert conn.execute('SELECT post_url FROM posts').fetchone()[0] is None
+
+
+def test_experiment_protection_survives_reingest(tmp_path):
+    with db.connect(tmp_path/'test.db') as conn:
+        sid=db.register_source(conn,'abc','source','general-own',state={'experiment_only':True})
+        db.register_source(conn,'abc','source','general-own',state={'experiment_only':False})
+        assert json.loads(conn.execute('SELECT state_json FROM sources WHERE id=?',(sid,)).fetchone()[0])['experiment_only'] is True
+
+
+def test_rerender_uses_persisted_trim(tmp_path,monkeypatch):
+    from maclips import tracking
+    monkeypatch.setattr(config,'DB_PATH',tmp_path/'test.db')
+    original={'rank':1,'start_word':0,'end_word':20,'start':0,'end':30}
+    with db.connect(config.DB_PATH) as conn:
+        sid=db.register_source(conn,'abc','source','general-own')
+        cid=db.save_candidate(conn,sid,'general-own',original)
+        edited={**original,'start_word':1,'start':1,'hook_text':'edited'}
+        conn.execute('UPDATE clips SET data_json=? WHERE id=?',(json.dumps(edited),cid))
+    ctx=RunContext('test',tmp_path/'source','abc',tmp_path,{},shared={'source_id':sid})
+    assert tracking.effective_candidate(ctx,original)==edited
