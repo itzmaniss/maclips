@@ -1439,6 +1439,64 @@ checkpoint.
   unsupported keyword. A schema-violating stubbed reply still stops at the
   malformed-output gate after exactly two calls, both carrying the schema.
 
+**Phase 3: two more sources ranked through the real CLI [V].** Both runs
+used `maclips run <url> … --language en --clip-class general-own`, with only
+a spend guard and stage timestamps wrapped around LiteLLM and the CLI
+(`work/session-20260925a/phase3_run.py`). `general-own` is an
+experiment-only label here, because the Reach and Lovable briefs are
+unconfirmed. Nothing was approved, exported or posted. Both runs stopped, as
+designed, at S9 ("awaiting review; no clips approved yet").
+
+| | Video 2 `BcrjhdSUv4Y` (`--from S5`) | Video 3 `DZtGxNs9AVg` (cold) |
+|---|---|---|
+| Probe | 33.6 min, Double Coverage Podcast | **1h09m48s**, Lenny's Podcast (Lovable CEO), up to 1920×1080. Kept, not swapped for 20VC |
+| S0–S3 | all `cached` (Phase 1 fix) | S0 0.07 s, S2 3.25 s, S3 **271.30 s**; `en`, 2.46% weak words |
+| S5 | 14.31 s, 1 attempt | 14.40 s, 1 attempt |
+| Kept / returned | **11 / 12**: 1 duration drop (the model's rank 1) | **12 / 12**: no drops |
+| Durations after snapping | 16.2–64.0 s | 38.8–132.6 s (median 83.6) |
+| Candidate starts | 74–1,889 s of 2,016 | 360–3,924 s of 4,188 |
+| Tokens (in / out / reasoning) | 16,897 / 1,042 / 20 | 24,336 / 1,176 / 0 |
+| Cost | $0.044214 | $0.060432 |
+| S4 windows | 11 windows, 38.59 s | 12 windows, 72.68 s |
+| S6 / S8 | 147.32 s / 56.19 s | 291.56 s / 175.47 s |
+| Blind sheet (`work/session-20260925a/`) | `v2-blind-sheet.md`, 11 moments | `v3-blind-sheet.md`, 12 moments |
+
+- Both replies were schema-valid on the first attempt. Adding the Phase 2
+  live call, **3 of 3 structured-output calls were valid first time**
+  across two sources. Before this session, every prompt-only first attempt
+  outside the benchmark's 44k unlabelled prompt had failed: 0 of 7 on the
+  benchmark's other forms (§5.2e) and 0 of 1 on video 2 (§5.2f). The sample
+  is small, so the fix is [I] until more sources are ranked.
+- Significant speakers per window: video 2
+  `[2, 2, 2, 2, 2, 1, 1, 3, 1, 2, 2]`; video 3 all 2. No expected count was
+  supplied, so the S4 gate did not apply.
+- **Video 3 is the first true end-to-end run:** one `maclips run <url>`
+  invocation went from a cold URL through S0 → S3 → S5 → S4 → S6 → S8, with
+  nothing cached. Times are measured from the wrapper's start. `/usr/bin/time`
+  shows 842.15 s for the whole process, so interpreter start-up adds about
+  1.9 s.
+
+| Mark (video 3, 69.8-min source) | t |
+|---|---:|
+| audio landed, resolve returned (video still downloading) | 11.37 s |
+| **S2 start** | **11.48 s** |
+| S3 end | 286.08 s |
+| **first candidates (S5 end)** | **300.48 s (5.0 min)** |
+| S4 end | 373.16 s |
+| S6 end (video had landed about 5 min earlier; no wait) | 664.73 s |
+| first preview (`first_preview` event, SQLite) | about 672 s |
+| **all 24 previews (S8 end)** | **840.21 s (14.0 min)** |
+
+  This fits §0's "within roughly 15 minutes" for a 70-minute source [V]. It
+  is not the 2-hour case: S3 and S6 grow with source length and candidate
+  length. A 2-hour source would take about 8.5 min to candidates (§0). Add
+  the benchmark's measured S6 (500.58 s) and S8 (127.52 s), plus about 96 s
+  of S4 (half of §5.2f's 191.9 s for 24 windows). That comes to roughly
+  20 minutes, so it would miss 15 minutes [I].
+- **Ledger:** 3 calls, **$0.148500** of the $1.00 cap. Phase 2 spent
+  $0.043854 and Phase 3 $0.104646. There were no retries and no gate
+  firings. The ledger and raw replies are in `work/session-20260925a/`.
+
 ### 5.2d Brief extraction fix, 2026-09-23 [V]
 
 **Diagnosis first.** Each of the 8 captured files was checked for the
