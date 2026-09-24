@@ -1388,6 +1388,57 @@ checkpoint.
   on a stubbed malformed reply without sending a request (4.88 s wall). Logs
   are in `work/session-20260925a/phase1-*.log`.
 
+**Phase 2: ranking output enforced by the API.**
+
+- **Docs read [V]:** Anthropic's structured-outputs page,
+  `platform.claude.com/docs/en/build-with-claude/structured-outputs.md`,
+  fetched 2026-09-25. The shape is `output_config: {format: {type:
+  "json_schema", schema}}` and needs no beta header. `claude-sonnet-5` is on
+  the supported list. Every object must set `additionalProperties: false`.
+  Numeric constraints (`minimum`, `maximum`, `multipleOf`), string length
+  constraints, `maxItems`, and `minItems` above 1 are unsupported. The
+  top-level `output_format` is deprecated and accepted only with the
+  `structured-outputs-2025-11-13` beta header. The page says nothing about
+  thinking. The bundled API reference lists extended thinking under "works
+  with".
+- **`RANKING_SCHEMA`:** now sets `additionalProperties: false` on both
+  objects. Nothing else changed, and it uses no unsupported keyword.
+- **Captured offline:** these are LiteLLM 1.102.0's bodies at
+  `HTTPHandler.post`, with the post patched to raise. All were captured with
+  `reasoning_effort="low"`. The full bodies are in
+  `work/session-20260925a/captured-bodies.json`. [V]
+
+| kwargs | body | beta header |
+|---|---|---|
+| `response_format={"type": "json_schema", …}` | deprecated top-level `output_format`, plus `output_config: {effort}` | `structured-outputs-2025-11-13` |
+| `extra_body={"output_config": {format}}` | a literal `extra_body` key inside the JSON body; effort-only `output_config` | none |
+| `output_config={format}` | `output_config: {format}`: **effort is lost** | `structured-outputs-2025-11-13` |
+| `output_config={effort, format}` | `output_config: {effort: "low", format}`, thinking adaptive | `structured-outputs-2025-11-13` |
+
+- **Chosen route:** the last row, which is the current API shape. The
+  unneeded beta header rides along, and the live call accepted it.
+  `llm.complete` gained `json_schema=`. It applies only to `anthropic/`
+  models and restates effort, because LiteLLM replaces the `output_config`
+  that `reasoning_effort` builds. Only `rank_fn` passes it. `brief_fn` is
+  unchanged.
+- **Live acceptance: one call [V].** The input was the second source's S5
+  prompt (7,721 words, 12 candidates, 10–180 s, no brief). The request
+  carried `output_config` keys `effort` and `format`. Result: no 400, finish
+  `stop`, **16,897 input / 1,006 output / 0 reasoning tokens**, 14.19 s,
+  **$0.043854**. The reply validates against `RANKING_SCHEMA` (checked with
+  `jsonschema`, already installed). `parse_candidates` returned 12, and
+  `post_process` kept 11 with 1 duration drop. The reply is minified JSON,
+  unlike the pretty-printed replies of earlier sessions. That points to
+  constrained decoding, but it is [I]. The input was 402 tokens above
+  session g's 16,495, which is consistent with the schema being added to
+  the prompt. That is [I] too, because Phase 1 re-transcribed S3, so the
+  transcripts may differ.
+- **Tests:** the captured `rank_fn` body carries `output_config == {effort:
+  "low", format: {json_schema, RANKING_SCHEMA}}` and has no `output_format`
+  or `response_format`. Every schema object is closed and uses no
+  unsupported keyword. A schema-violating stubbed reply still stops at the
+  malformed-output gate after exactly two calls, both carrying the schema.
+
 ### 5.2d Brief extraction fix, 2026-09-23 [V]
 
 **Diagnosis first.** Each of the 8 captured files was checked for the
@@ -1470,15 +1521,17 @@ Input lines carry the first word's index, without start times [V, current
 `ranking.build_transcript`]. The output contains word indices only; timestamps
 are resolved from alignment data. Start times were removed in `c95e4ba`.
 
-The prompt asks for JSON only. **JSON is enforced client-side only [V]:**
-`rank_fn` passes `response_format={"type": "json_object"}`, but LiteLLM
-1.102.0 drops it for Anthropic when no schema is attached, so it never
-reaches the API (§5.2c; the captured body has no `response_format` and no
-`output_config.format`). `ranking.parse_candidates` checks the essentials
-(a `candidates` array, integer word indices); `RANKING_SCHEMA` is not sent
-and not validated against. API-side structured outputs
-(`output_config.format` with a JSON schema) is a follow-up, untested on
-Sonnet 5 with thinking on [U]. Per candidate:
+The prompt asks for JSON only. **The API enforces the schema, and the
+client still checks it [V, §5.2g].** `rank_fn` sends
+`output_config.format = {type: "json_schema", schema: RANKING_SCHEMA}` beside
+`output_config.effort = "low"`. The API constrains the reply to that schema.
+It was accepted by Sonnet 5 with adaptive thinking on in one live call on the
+second source. `ranking.parse_candidates` still parses every reply, and §5.4
+still gates it. The schema cannot express index ranges, sentence snapping,
+duration or overlap, and a refusal or a `max_tokens` stop can break it.
+Before §5.2g, JSON was enforced client-side only: LiteLLM dropped
+`response_format={"type": "json_object"}` for Anthropic. Brief extraction
+(`brief_fn`) still works that way. Per candidate:
 
 - `start_word`, `end_word`;
 - `hook_text` (at most ~8 words, for the on-screen opener);
@@ -1497,7 +1550,7 @@ The prompt instructs:
 
 ### 5.4 Deterministic post-processing (S5 gates)
 
-1. Validate the schema. Retry once, then stop.
+1. Validate the schema client-side, although the API already constrains the reply to it (§5.3): a refusal, a truncated reply or a schema the API cannot fully express still reaches this check. Retry once, then stop.
 2. Snap spans to sentence boundaries.
 3. Drop spans outside the brief's duration range after snapping.
 4. Remove overlaps (keep the higher-ranked candidate).

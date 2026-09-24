@@ -6,7 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from maclips import config, llm
+from maclips import config, llm, ranking
+from maclips.ranking import RANKING_SCHEMA
 
 
 def _response(text, finish_reason, prompt=44_014, completion=16_000, reasoning=16_000,
@@ -59,11 +60,54 @@ def test_rank_fn_sends_low_effort_adaptive_thinking_and_no_temperature(monkeypat
     body = sent["body"]
     body = json.loads(body) if isinstance(body, (str, bytes)) else body
     assert body["thinking"]["type"] == "adaptive"
-    assert body["output_config"] == {"effort": "low"}
     assert body["max_tokens"] == llm.RANK_MAX_TOKENS
     assert "temperature" not in body
-    # json_object never reaches the API for Anthropic (§5.3).
-    assert "response_format" not in body and "format" not in body["output_config"]
+    # §5.3: the schema goes in output_config.format beside the effort, not in
+    # the deprecated top-level output_format LiteLLM's response_format sends.
+    assert body["output_config"] == {
+        "effort": "low",
+        "format": {"type": "json_schema", "schema": RANKING_SCHEMA},
+    }
+    assert "output_format" not in body and "response_format" not in body
+
+
+def test_ranking_schema_is_valid_for_structured_outputs():
+    """Every object closed; no keyword structured outputs rejects (§5.3)."""
+    unsupported = {"minimum", "maximum", "multipleOf", "minLength", "maxLength", "maxItems"}
+
+    def walk(node):
+        if isinstance(node, dict):
+            if node.get("type") == "object":
+                assert node.get("additionalProperties") is False
+            assert not unsupported & node.keys()
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+    walk(RANKING_SCHEMA)
+
+
+def test_a_schema_violating_reply_still_gates_client_side(monkeypatch):
+    """The API constraint is not trusted alone: a reply that breaks the schema
+    stops at the malformed-output gate after the one retry, as before (§5.4)."""
+    import litellm
+
+    from test_ranking import words
+
+    calls = []
+
+    def fake(**kwargs):
+        calls.append(kwargs)
+        return _response('{"candidates": [{"start_word": "seven"}]}', "stop",
+                         completion=50, reasoning=0)
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(litellm, "completion", fake)
+    with pytest.raises(ranking.RankingError, match="no usable word indices"):
+        ranking.rank(words(), llm_fn=llm.rank_fn)
+    assert len(calls) == 2
+    assert all(c["output_config"]["format"]["schema"] is RANKING_SCHEMA for c in calls)
 
 
 def test_truncation_while_thinking_is_reported_as_truncation(fake_completion):

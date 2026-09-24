@@ -75,11 +75,16 @@ RANKING_SCHEMA = {
                     "brief_flags": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["start_word", "end_word", "hook_text", "why", "topic"],
+                "additionalProperties": False,
             },
         }
     },
     "required": ["candidates"],
+    "additionalProperties": False,
 }
+"""Sent as the S5 structured-output format (§5.3). Structured outputs require
+`additionalProperties: false` on every object and reject numeric and length
+constraints, so index ranges, durations and overlap stay with post_process."""
 
 PROMPT = """You are selecting standalone short-form clips from a long transcript.
 

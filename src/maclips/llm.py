@@ -23,6 +23,7 @@ def complete(
     json_only: bool = False,
     usage_sink: list | None = None,
     reasoning_effort: str | None = None,
+    json_schema: dict | None = None,
 ) -> str:
     """Send one prompt, return the text. Raises on a truncated or empty completion.
 
@@ -46,7 +47,16 @@ def complete(
         # output_config.effort (§5.2c). "none" sends nothing at all, which
         # leaves Sonnet 5 thinking at its default high effort.
         kwargs["reasoning_effort"] = reasoning_effort
-    if json_only:
+    if json_schema is not None and model.startswith("anthropic/"):
+        # API-enforced JSON (§5.3). LiteLLM 1.102.0 forwards an explicit
+        # output_config as is, but it replaces the one reasoning_effort builds,
+        # so effort is restated here. Its response_format json_schema route
+        # sends the deprecated top-level output_format instead.
+        output_config: dict = {"format": {"type": "json_schema", "schema": json_schema}}
+        if reasoning_effort is not None:
+            output_config["effort"] = reasoning_effort
+        kwargs["output_config"] = output_config
+    elif json_only:
         # LiteLLM drops this for Anthropic when no schema is attached (§5.3):
         # JSON-only is enforced by the prompt and the caller's parser.
         kwargs["response_format"] = {"type": "json_object"}
@@ -118,10 +128,15 @@ def rank_fn(prompt: str, usage_sink: list | None = None) -> str:
     """The ranking tier (Sonnet), adaptive thinking at low effort. PLAN.md §5.2.
 
     Temperature is omitted: Sonnet 5 rejects any non-default sampling value.
+    The reply is constrained to RANKING_SCHEMA by the API; ranking still
+    parses and gates it, because the schema cannot check indices or spans.
     """
+    from .ranking import RANKING_SCHEMA
+
     return complete(prompt, model=config.RANKING_MODEL, json_only=True,
                     max_tokens=RANK_MAX_TOKENS, temperature=None,
-                    reasoning_effort="low", usage_sink=usage_sink)
+                    reasoning_effort="low", usage_sink=usage_sink,
+                    json_schema=RANKING_SCHEMA)
 
 
 def brief_fn(prompt: str) -> str:
