@@ -1872,6 +1872,45 @@ second-source face run or sheet was fabricated. Step 6's two-source/user
 acceptance remains pending. All campaign confirmation, approval, disclosure
 and posting actions remain with the user.
 
+**Session 2026-09-25a, step 6 on two more sources [V].** S6 face tracking
+and S8 previews ran through the real `maclips run` CLI for both sources,
+with candidates from real S5 ranking and no imported manifest. Method and
+thresholds are as in Phase 4 above. S6 wall is the stage's own time, and the
+S6 window sum is the sum of per-window analysis times.
+
+| | Frames | S6 wall | S6 window sum | S8 (previews) | Primary: split / face-centred / letterbox |
+|---|---:|---:|---:|---:|---|
+| Video 2 `BcrjhdSUv4Y`, 11 candidates | 1,998 | 147.32 s | 147.02 s | 56.19 s (22) | 1 / 10 / 0 |
+| Video 3 `DZtGxNs9AVg`, 12 candidates | 5,182 | 291.56 s | 291.08 s | 175.47 s (24) | 10 / 2 / 0 |
+
+Every candidate also offers letterbox. No candidate is letterbox-only.
+Video 2's candidate numbers follow the model's rank, and its rank 1 was
+dropped for duration. Retained tracks per shot, in shot order:
+
+| Video 2 cand. | Frames | Tracks per shot | Primary | | Video 3 cand. | Frames | Tracks per shot | Primary |
+|---|---:|---|---|---|---|---:|---|---|
+| 2 | 174 | 1,1,1,1,1,1,0 | face-centred | | 1 | 430 | 1,2,1,1 | split |
+| 3 | 81 | 1,1,0 | face-centred | | 2 | 466 | 4,2 | split |
+| 4 | 172 | 1,1 | face-centred | | 3 | 663 | 3,2,0,2 | split |
+| 5 | 320 | 1,1,1,1,2,0,0,1,1 | face-centred | | 4 | 377 | 3,2 | split |
+| 6 | 175 | 1,1,0 | face-centred | | 5 | 224 | 2,1,0 | split |
+| 7 | 142 | 1,1,1,1 | face-centred | | 6 | 381 | 0,1,0 | face-centred |
+| 8 | 154 | 1,0,1,1,0,1,1,1,0 | face-centred | | 7 | 332 | 1,1 | face-centred |
+| 9 | 128 | 1,1,1 | face-centred | | 8 | 194 | 2,1,2 | split |
+| 10 | 160 | 1,1,1,0,1,1,1,2,1,0,1,1,1 | split | | 9 | 576 | 1,1,3,1,2,1 | split |
+| 11 | 320 | 1,1,1,0,1,1,1,1,1,1,1,1,0 | face-centred | | 10 | 537 | 3,1,1,1 | split |
+| 12 | 172 | 1,1 | face-centred | | 11 | 597 | 1,2,1 | split |
+| | | | | | 12 | 405 | 1,1,1,1,2 | split |
+
+- Video 2 cuts between single-person shots, so it is mostly face-centred.
+  Video 3 has wide two-shots, so it is mostly split. Whether those layouts
+  are correct is **[U] until the user judges the previews**; step 6's
+  acceptance is the user's.
+- Previews: `work/7899e5b0d2733cfe/previews/` (video 2) and
+  `work/7f8b3b5213024774/previews/` (video 3). Check images with face
+  rectangles and shot indices are in `…/face-checks/<candidate>/` in the
+  same workdirs. Summaries are in `work/session-20260925a/v{2,3}-summary.json`.
+
 ## 7. Campaign workflow
 
 ### 7.1 Lifecycle
@@ -1961,6 +2000,15 @@ checks built and fixture-tested [V]; semantic and unrepresentable brief rules
 remain human checks. Step 6 face tracking and static shot layouts are built
 and run on the benchmark [V]; second-source execution and user judgment remain
 pending [U]. Steps 5 and 6 are not declared accepted end to end.
+
+**Session 2026-09-25a status [V]:** `maclips run <url>` went from a cold URL
+through S5 → S4 → S6 → S8 in one real invocation for the first time (video 3,
+all previews at 14.0 min, §5.2g). S5 now requests API-enforced structured
+output, and `--from S5` reuses S0–S3. Step 4 has candidates for three sources
+through ranking (benchmark, video 2, video 3), but its "done when" is the
+user's judgement of the blind sheets, which is pending. Step 6 has run on
+three real sources through S8, and its acceptance is the user's judgement of
+the previews, also pending.
 
 **Critical path to first earnings:** 1 → 2 → 4 → 5 → 6, with 3 and 8 in parallel.
 
