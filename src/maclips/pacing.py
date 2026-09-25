@@ -78,6 +78,29 @@ def padded_span(words: list[dict], start: float, end: float) -> tuple[float, flo
     return start - max(0.0, head), end + max(0.0, tail)
 
 
+def speech_overrun(words: list[dict], turns: list[dict], end_word: int | None) -> dict | None:
+    """Where the last speaker's S4 turn outlasts the last aligned word (§6.7).
+
+    Video 3 candidate 11 ended on "0.1%.", aligned to 0.26 s, while its S4
+    turn ran 0.74 s on at about -17 dBFS and the next word came 2.08 s later.
+    The end then follows the turn (capped at OVERRUN_MAX_S) rather than
+    cutting before the word, which would drop the clip's payoff.
+    """
+    last = words[end_word] if isinstance(end_word, int) and 0 <= end_word < len(words) else None
+    if not last or last.get("start") is None or last.get("end") is None or not turns:
+        return None
+    a, b = float(last["start"]), float(last["end"])
+    turn = max(turns, key=lambda t: min(b, float(t["end"])) - max(a, float(t["start"])))
+    if min(b, float(turn["end"])) - max(a, float(turn["start"])) <= 0:
+        return None
+    overrun = float(turn["end"]) - b
+    following = next((float(w["start"]) for w in words[end_word + 1:] if w.get("start") is not None), None)
+    if overrun <= config.OVERRUN_MIN_S or (following is not None and following <= float(turn["end"])):
+        return None
+    return {"from": b, "to": b + min(overrun, config.OVERRUN_MAX_S), "turn_end": float(turn["end"]),
+            "speaker": turn["speaker"]}
+
+
 def half_frame(t: float, fps: float, origin: float) -> float:
     return origin + (math.floor((t - origin) * fps) + .5) / fps
 

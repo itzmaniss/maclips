@@ -20,6 +20,15 @@ from typing import Any
 SENTENCE_END = re.compile(r"[.!?]['\"’”)]*$")
 # A cold-open line may be a phrase: it may also end at a clause mark.
 PHRASE_END = re.compile(r"([.!?,;:]|--|[—–])['\"’”)]*$")
+# Whisper writes "..." for a hesitation, usually mid-sentence (§6.7): a clip or
+# line never ends there. The transcript shown to the model is unchanged.
+TRAILING_OFF = re.compile(r"(\.\.\.|…)['\"’”)]*$")
+# A sentence end followed this closely by the same speaker is a run-on (§6.7).
+RUN_ON_GAP_S = 0.3
+# At most this many sentences are added to reach a pause. On video 2's fast
+# speaker the needed extensions were 1-2 sentences (0.5-6.6 s) or 3-11
+# (11.8-43 s), material the model never picked (§6.7) [V].
+RUN_ON_MAX_SENTENCES = 2
 
 MIN_SURVIVING_CANDIDATES = 5
 # Used only when the brief states no range. Any clip postable on Reels, TikTok
@@ -65,6 +74,17 @@ class Candidate:
     payoff_words: tuple[int | None, int | None] = (None, None)
     tease: dict[str, Any] | None = None
     payoff: dict[str, Any] | None = None
+    # The model's raw span, kept for audit; start_word/end_word are snapped.
+    model_start_word: int | None = None
+    model_end_word: int | None = None
+    # Boundary decisions a reviewer should see (§6.7); never a filter.
+    boundary_notes: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.model_start_word is None:
+            self.model_start_word = self.start_word
+        if self.model_end_word is None:
+            self.model_end_word = self.end_word
 
     @property
     def duration(self) -> float:
@@ -79,6 +99,8 @@ class Candidate:
             "brief_flags": self.brief_flags, "start": self.start, "end": self.end,
             "duration": self.duration, "hook_strength": self.hook_strength,
             "tease": self.tease, "payoff": self.payoff,
+            "model_start_word": self.model_start_word, "model_end_word": self.model_end_word,
+            "boundary_notes": self.boundary_notes,
         }
 
 
@@ -197,41 +219,107 @@ def build_transcript(words: Sequence[Any], with_speakers: bool = False) -> str:
     return "\n".join(lines)
 
 
+def _ends_with(pattern: re.Pattern, text: str) -> bool:
+    return bool(pattern.search(text)) and not TRAILING_OFF.search(text)
+
+
 def sentence_starts(words: Sequence[Any]) -> list[int]:
     """Indices where a sentence begins. A clip may only start here."""
-    starts = [0]
-    for i, w in enumerate(words[:-1]):
-        text = w.word if hasattr(w, "word") else w["word"]
-        if SENTENCE_END.search(text):
-            starts.append(i + 1)
-    return starts
+    return [0] + [i + 1 for i, w in enumerate(words[:-1]) if _ends_with(SENTENCE_END, _word(w))]
 
 
 def sentence_ends(words: Sequence[Any]) -> list[int]:
     """Indices where a sentence ends. A clip may only end here."""
-    ends = [
-        i for i, w in enumerate(words)
-        if SENTENCE_END.search(w.word if hasattr(w, "word") else w["word"])
-    ]
+    ends = [i for i, w in enumerate(words) if _ends_with(SENTENCE_END, _word(w))]
     if not ends or ends[-1] != len(words) - 1:
         ends.append(len(words) - 1)
     return ends
+
+
+def exclusive_end(lo: int, hi: int, starts: set[int]) -> int:
+    """The model's end index, read as exclusive when it opens a sentence.
+
+    17 of 22 real end indices were the first word of the next sentence (§6.7):
+    the model sees an index only for each line's first word and gives the next
+    line's. Outward snapping then appended that whole sentence.
+    """
+    return hi - 1 if hi > lo and hi in starts else hi
 
 
 def snap(candidate: Candidate, starts: list[int], ends: list[int], total: int) -> Candidate:
     """Move a span outward to the nearest sentence boundary (§2.2 item 3).
 
     Outward, not nearest: snapping inward could cut the very sentence that made
-    the moment worth clipping.
+    the moment worth clipping. An end index that opens a sentence is first read
+    as exclusive (`exclusive_end`).
     """
     lo = max(0, min(candidate.start_word, total - 1))
     hi = max(0, min(candidate.end_word, total - 1))
     if hi < lo:
         lo, hi = hi, lo
+    moved = exclusive_end(lo, hi, set(starts))
+    if moved != hi:
+        candidate.boundary_notes.append("model end opened the next sentence; ended on the one before")
+        hi = moved
 
     start = max((s for s in starts if s <= lo), default=starts[0])
     end = min((e for e in ends if e >= hi), default=ends[-1])
     candidate.start_word, candidate.end_word = start, end
+    return candidate
+
+
+def _speaker(w: Any) -> Any:
+    return w.speaker if hasattr(w, "speaker") else w.get("speaker")
+
+
+def _time(w: Any, key: str) -> float | None:
+    return getattr(w, key) if hasattr(w, key) else w.get(key)
+
+
+def pause_end(end_word: int, words: Sequence[Any], ends: list[int]) -> int:
+    """The first sentence end at or after `end_word` that the speaker pauses on.
+
+    A pause is at least RUN_ON_GAP_S of silence before the next word, a
+    speaker change, or the transcript's end. S5 ranks an unlabelled transcript
+    (§2.2 item 1), so normally only the gap decides.
+    """
+    for e in ends:
+        if e < end_word:
+            continue
+        if e + 1 >= len(words):
+            return e
+        here, after = words[e], words[e + 1]
+        a, b = _time(here, "end"), _time(after, "start")
+        spk_a, spk_b = _speaker(here), _speaker(after)
+        if (a is not None and b is not None and b - a >= RUN_ON_GAP_S - 1e-9) or \
+                (spk_a is not None and spk_b is not None and spk_a != spk_b):
+            return e
+    return len(words) - 1
+
+
+def extend_run_on(candidate: Candidate, words: Sequence[Any], ends: list[int],
+                  max_duration_s: float) -> Candidate:
+    """Extend a timed clip whose speaker runs straight on to the next pause.
+
+    The extension must stay within `max_duration_s` and RUN_ON_MAX_SENTENCES;
+    if it cannot, the end is kept and the clip carries a note for Review.
+    """
+    target = pause_end(candidate.end_word, words, ends)
+    if target == candidate.end_word:
+        return candidate
+    added = sum(1 for e in ends if candidate.end_word < e <= target)
+    trial = resolve_times(Candidate(0, candidate.start_word, target), words)
+    if added > RUN_ON_MAX_SENTENCES:
+        candidate.boundary_notes.append(
+            f"speaker runs on past the end; the next pause is {added} sentences later")
+        return candidate
+    if trial.end is not None and trial.start is not None and trial.duration <= max_duration_s:
+        candidate.boundary_notes.append(
+            f"speaker ran on; extended {target - candidate.end_word} words to the next pause")
+        candidate.end_word = target
+        return resolve_times(candidate, words)
+    candidate.boundary_notes.append(
+        "speaker runs on past the end; the next pause would exceed the duration range")
     return candidate
 
 
@@ -315,17 +403,12 @@ def _index(value: Any) -> int | None:
 
 def phrase_starts(words: Sequence[Any]) -> list[int]:
     """Indices where a sentence or phrase begins."""
-    starts = [0]
-    for i, w in enumerate(words[:-1]):
-        if PHRASE_END.search(w.word if hasattr(w, "word") else w["word"]):
-            starts.append(i + 1)
-    return starts
+    return [0] + [i + 1 for i, w in enumerate(words[:-1]) if _ends_with(PHRASE_END, _word(w))]
 
 
 def phrase_ends(words: Sequence[Any]) -> list[int]:
     """Indices where a sentence or phrase ends."""
-    ends = [i for i, w in enumerate(words)
-            if PHRASE_END.search(w.word if hasattr(w, "word") else w["word"])]
+    ends = [i for i, w in enumerate(words) if _ends_with(PHRASE_END, _word(w))]
     if not ends or ends[-1] != len(words) - 1:
         ends.append(len(words) - 1)
     return ends
@@ -371,7 +454,8 @@ def cold_open_choice(clip: dict) -> tuple[str, dict] | None:
 
 
 def cold_open_spans(candidate: Candidate, words: Sequence[Any],
-                    starts: list[int], ends: list[int]) -> Candidate:
+                    starts: list[int], ends: list[int],
+                    sentence_start_set: set[int] | None = None) -> Candidate:
     """Check, snap and time the tease and payoff lines of a snapped, timed clip.
 
     An invalid line only disables that cold-open mode for this clip; it never
@@ -387,6 +471,8 @@ def cold_open_spans(candidate: Candidate, words: Sequence[Any],
         if not candidate.start_word <= lo <= hi <= candidate.end_word:
             span["problem"] = "outside the clip"
             return span
+        # Same exclusive-end reading as the clip (§6.7).
+        hi = exclusive_end(lo, hi, sentence_start_set or set())
         # Outward, like clip spans. Clip ends are sentence ends, which are also
         # phrase ends, so the snapped line stays inside the clip.
         a = max(s for s in starts if s <= lo)
@@ -423,6 +509,7 @@ def post_process(
 ) -> tuple[list[Candidate], dict[str, int]]:
     """§5.4 steps 2-4. Returns survivors and a count of what each filter dropped."""
     starts, ends = sentence_starts(words), sentence_ends(words)
+    start_set = set(starts)
     pstarts, pends = phrase_starts(words), phrase_ends(words)
     total = len(words)
     dropped = {"out_of_range": 0, "no_timing": 0, "duration": 0, "overlap": 0}
@@ -440,7 +527,8 @@ def post_process(
         if not (min_duration_s <= c.duration <= max_duration_s):
             dropped["duration"] += 1
             continue
-        staged.append(cold_open_spans(c, words, pstarts, pends))
+        extend_run_on(c, words, ends, max_duration_s)
+        staged.append(cold_open_spans(c, words, pstarts, pends, start_set))
 
     before = len(staged)
     kept = remove_overlaps(staged)

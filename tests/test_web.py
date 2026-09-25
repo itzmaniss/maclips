@@ -207,3 +207,19 @@ def test_review_shows_hook_strength_for_display_only(studio):
         data=json.loads(conn.execute('SELECT data_json FROM clips WHERE id=?',(cid,)).fetchone()[0]);data['hook_strength']=.72
         conn.execute('UPDATE clips SET data_json=? WHERE id=?',(json.dumps(data),cid))
     assert 'hook 0.72' in client.get('/',params={'tab':'review','source':sid}).text
+
+
+def test_review_shows_boundary_notes_overrun_and_the_playhead_timeline(studio):
+    client,headers,sid,cid=studio
+    with db.connect(config.DB_PATH) as conn:
+        data=json.loads(conn.execute('SELECT data_json FROM clips WHERE id=?',(cid,)).fetchone()[0])
+        data['boundary_notes']=['speaker ran on; extended 5 words to the next pause']
+        data['layout']='centre'
+        data['previews']['centre']={'path':'x','timeline':[[0.0,-0.12,12.0],[12.0,14.5,30.12]],
+                                    'speech_overrun':{'from':30.0,'to':30.74}}
+        conn.execute('UPDATE clips SET data_json=? WHERE id=?',(json.dumps(data),cid))
+    page=client.get('/',params={'tab':'review','source':sid}).text
+    assert 'extended 5 words to the next pause' in page and 'turn 0.74 s past the last aligned word' in page
+    assert "data-timeline='[[0.0, -0.12, 12.0], [12.0, 14.5, 30.12]]'" in page
+    js=(Path(web.__file__).parent/'static'/'app.js').read_text()
+    assert 'editor.dataset.timeline' in js

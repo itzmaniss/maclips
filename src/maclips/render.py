@@ -316,7 +316,8 @@ def render_clip(video: Path, audio: Path, candidate: dict, words: list[dict],
     timeline inside the same single pass. A `cold_open` of tease or payoff
     plays that line first, then a white-flash cut, then the whole clip. The
     planned duration, which the output gate checks, is the combined edited
-    duration; `duration_range` gates it before encoding.
+    duration; `duration_range` gates it before encoding, without the edge
+    pads, which are silence added for the cut, not content (§6.7).
     """
     start = _number(candidate.get("start"), "start")
     end = _number(candidate.get("end"), "end")
@@ -332,6 +333,10 @@ def render_clip(video: Path, audio: Path, candidate: dict, words: list[dict],
     if outpath in (video, audio):
         raise RenderError("output may not replace an original input")
     segments = clipped_segments(plan["segments"], start, end) if "segments" in plan else None
+    overrun = plan.get("speech_overrun")
+    if overrun and abs(_number(overrun.get("from"), "overrun") - end) < 1e-6:
+        end = max(end, _number(overrun.get("to"), "overrun"))  # S7: the turn outlasts the word
+    content = (start, end)
     start, end = padded_span(words, start, end)
     if segments:
         segments[0]["start"], segments[-1]["end"] = start, end
@@ -351,7 +356,11 @@ def render_clip(video: Path, audio: Path, candidate: dict, words: list[dict],
         if cold:
             if pacing["fps"] is None:
                 pacing["fps"], pacing["origin"] = _frame_grid(video)
-            lead = cold_open_keep(float(cold[1]["start"]), float(cold[1]["end"]), pacing["fps"], pacing["origin"])
+            # Padded like the clip edges; the 25 ms join crossfade then fades
+            # the line out inside its pad, before the flash cut (§6.7).
+            line = (float(cold[1]["start"]), float(cold[1]["end"]))
+            padded_line = padded_span(words, *line)
+            lead = cold_open_keep(*padded_line, pacing["fps"], pacing["origin"])
             if not lead:
                 raise RenderError("cold open line has no whole frame")
         # Everything below runs on the combined timeline: the line, then the clip.
@@ -359,8 +368,11 @@ def render_clip(video: Path, audio: Path, candidate: dict, words: list[dict],
         order, duration = lead + keeps, lead_s + duration
         switches = [lead_s + t for t in switches]
         ss = min(a for a, _ in order)
-        if duration_range and not duration_range[0] <= duration <= duration_range[1]:
-            raise RenderError(f"edited duration {duration:.3f}s outside "
+        padding = (content[0] - start) + (end - content[1])
+        if lead:
+            padding += (line[0] - padded_line[0]) + (padded_line[1] - line[1])
+        if duration_range and not duration_range[0] <= duration - padding <= duration_range[1]:
+            raise RenderError(f"edited duration {duration - padding:.3f}s outside "
                               f"{duration_range[0]:g}–{duration_range[1]:g}s")
         ow, oh = (540, 960) if proxy else (1080, 1920)
         base = f"[0:v]trim=duration={duration:.6f},setpts=PTS-STARTPTS"
@@ -445,7 +457,11 @@ def render_clip(video: Path, audio: Path, candidate: dict, words: list[dict],
             "width": measured["width"], "height": measured["height"],
             "has_audio": measured["has_audio"], "wall_s": time.perf_counter() - begun,
             "layout": kind, "proxy": proxy, "diagnostic": diagnostic,
-            "source_span_s": end - start,
+            "source_span_s": end - start, "edge_padding_s": padding,
+            "speech_overrun": overrun if content[1] > float(candidate["end"]) else None,
+            # [edited start, source start, source end] per played interval, so
+            # Review can map the playhead back to source time.
+            "timeline": [[sum(y - x for x, y in order[:i]), a, b] for i, (a, b) in enumerate(order)],
             "pacing": {"dead_air": pacing["dead_air"], "zoom": pacing["zoom"],
                        "cuts": len(keeps) - 1, "removed_s": (end - start) - (duration - lead_s),
                        "keeps": keeps, "triggers": pacing["triggers"], "switches": switches,

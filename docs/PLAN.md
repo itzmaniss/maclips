@@ -2423,7 +2423,8 @@ it.", 0.02 s).
   - all passed the 0.1 s drift gate, with audio present;
   - the edited length grew by 0.05–0.24 s;
   - tail pads were 0.010–0.127 s, and 14 of 22 clips now end with the final
-    40 ms at or below −44 dBFS;
+    40 ms at or below −44 dBFS (1 of 22 before; the commit message of
+    `c44a6a1` wrongly says none);
   - clips whose next word follows within about 0.05 s (video 2 ranks 1, 4, 6
     and 12, video 3 ranks 1 and 10) still end on sound, because causes 1 and
     2 leave no silence to pad into;
@@ -2443,7 +2444,7 @@ it.", 0.02 s).
   0.10 s later. This is mid-sentence by design: §5.4 item 6 allows clause
   marks.
 
-**Proposed, not built (user decides).**
+**Proposed in the audit (all five were approved and built; see below).**
 1. When the model's `end_word` is the first word of a sentence after its
    `start_word`, end the clip on the previous sentence end. This targets
    cause 1 (17/22 hits against a ~8% base rate). An alternative with the same
@@ -2458,6 +2459,95 @@ it.", 0.02 s).
    word follows, extend the end to the turn end, or flag the clip in Review
    (cause 4).
 5. Pad or fade the end of the cold-open line before the flash cut.
+
+**End-boundary fixes, session 2026-09-25 (endfix) [V].** The user approved
+all five proposals. Built with S5 v3, S7 v5, S8 v7 and S12 v6:
+1. **Exclusive end index** (`ranking.exclusive_end`). A model `end_word` (and
+   a tease or payoff end) that opens a sentence after its start is read as
+   exclusive, so the span ends on the sentence before. The raw indices are
+   kept as `model_start_word`/`model_end_word`.
+2. **"..." is not a sentence or phrase end** for snapping (`TRAILING_OFF`).
+   `build_transcript` is unchanged, so the model's input is the same.
+   - Bare fragments such as "I think." are **not** handled: no rule found
+     separates them from real short sentences ("Holy shit.", "Okay.") without
+     a word list [I]. Video 2 rank 8 still ends on "I think.". Video 2
+     rank 12 ends on "They're going to be like." (Whisper put a period
+     before a quote).
+3. **Pause-aware ends** (`extend_run_on`). The end extends to the next
+   sentence end followed by ≥0.3 s of silence or a speaker change.
+   - S5 runs before diarization (§2.2 item 1), so only the gap decides there
+     [V].
+   - **Capped at 2 added sentences** (`RUN_ON_MAX_SENTENCES`), beyond the
+     brief's range cap. Uncapped, video 2's fast speaker needed 3–11 sentences
+     (11.8–43 s of material the model never picked) for 7 of 12 clips. The
+     1–2-sentence cases added 0.5–6.6 s.
+   - A capped or out-of-range clip keeps its end and gets a `boundary_notes`
+     line shown in Review.
+4. **Diarization overrun** (`pacing.speech_overrun`, S7). When the last
+   word's S4 turn runs more than 0.3 s past it and no aligned word starts
+   before the turn ends, the end follows the turn, capped at +0.8 s.
+   - **Chose extend over cut.** In video 3 rank 11 the squeezed word "0.1%."
+     is the payoff. Cutting before it would end on "in the top". The turn
+     ended 0.74 s on, at about −17 dBFS, and 2.08 s before the next aligned
+     word, so no other speech enters.
+   - The 0.3 s threshold excludes the 0.16 s and 0.22 s overruns seen at
+     video 2 rank 8 and video 3 rank 7, where the source is at the noise
+     floor after about 50 ms (pyannote's own margin).
+   - Review shows "end follows the speaker's diarized turn … check that it
+     is still speech". A trimmed end no longer matches, so the overrun is
+     ignored.
+5. **Cold-open line** padded with `padded_span`. The existing 25 ms
+   triangular join crossfade then fades the line out inside its pad, before
+   the flash cut.
+
+**Both side effects fixed.**
+- **Playhead.** Each render result carries `timeline` (edited start, source
+  start, source end per played interval). Review's `[`/`]` map the playhead
+  through it, which also fixes the old drift from dead-air cuts and the cold
+  open.
+- **S12 gate.** It now gates the edited duration **without the edge and line
+  pads** (`edge_padding_s`), because the pads are silence added for the cut,
+  not content. The overrun counts as content. Tested.
+
+**Re-run on cached raw replies, no API call.**
+`work/session-20260925-endfix/replay_run.py` replaces `llm.rank_fn` with the
+cached reply (`raw-01-v2.txt`, `raw-02-v3.txt`) and makes
+`litellm.completion` abort. S0–S3 were cache hits. S4 took 34.7 s and S6
+133.3 s for video 2. S8 took 55.6 s for video 2 and 98.3 s for video 3.
+- Video 2: 12 returned, 11 kept, 1 overlap. Video 3: 11 returned, 11 kept.
+  Both pass the ≥5 gate.
+- Exclusive end: 8 of 11 clips in video 2, 9 of 11 in video 3.
+- Run-on extended: video 2 ranks 4, 5, 8 and 12, and video 3 ranks 6 and 10.
+  Run-on capped and noted: video 2 ranks 1, 2, 6, 7, 9 and 11.
+- Overrun: one, video 2 rank 12 (+0.30 s, into digital silence in the
+  source). Video 3 rank 11 now ends on "top 1% in the global population."
+  (gap 1.04 s), so the "0.1%." case no longer arises there.
+- Valid cold-open lines rose from 2 of 44 to 5 of 44.
+
+**Audit after [V]** (`work/session-20260925-endfix/audit.txt`).
+- The same-speaker <0.3 s rule: video 2 went from 6 of 11 to 4 of 11 (ranks
+  2, 6, 7 and 9), all capped runs with a Review note. Video 3 went from 4 of
+  11 to 0 of 11.
+- "Moved inward" now fires on every exclusive-end clip by construction
+  (model end − 1). Against the exclusive reading, it fires on none.
+- "..." endings: 2 → 0.
+- Quiet final 40 ms (≤ −44 dBFS; `last40.py`):
+  - video 2: 1/11 in rank-v2, 7/11 in midspeech-fix, 4/11 in endfix;
+  - video 3: 0/11, 7/11 and 9/11.
+- Video 2's drop is the trade: its content-correct sentence ends have no
+  pause (0.02–0.18 s gaps), and the old wrong ends sometimes sat on one.
+  For example, rank 2 now ends "matured a little bit more.", not "Not that
+  I'm...".
+- No dead-air cut is inside a word. Every preview passed the 0.1 s drift
+  gate with audio.
+- Cold open: video 2 rank 12's payoff line now ends at −35.3 dBFS in its
+  last 40 ms, against −21.6 in the old preview (a different, correctly ended
+  line). Video 3 rank 6's payoff ends at −17.4 dBFS: "Holy shit." runs into
+  the host's "Okay." 0.28 s later.
+
+Previews are in `work/{7899e5b0d2733cfe,7f8b3b5213024774}/previews-endfix/`,
+with the old folders kept. Also there: `12-face-centred-payoff.mp4` and
+`6-split-payoff.mp4`.
 
 ## 7. Campaign workflow
 
@@ -2592,6 +2682,12 @@ must bump its version.
 - Only 2 of 44 model lines pass the checks (§5.3). That is for the user to
   decide, as are the new blind sheets and the A/B test on whether the cold
   open helps.
+
+**Session 2026-09-25 mid-speech and end-boundary status [V]:** clip edges
+are padded (`c44a6a1`). The five end-boundary fixes and both side-effect
+fixes are built and re-run on cached replies with no spend (§6.7). The
+remaining mid-speech endings are video 2's fast speaker (capped runs, noted in
+Review) and bare fragments such as "I think.", which have no rule yet.
 
 **Critical path to first earnings:** 1 → 2 → 4 → 5 → 6, with 3 and 8 in parallel.
 

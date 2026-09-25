@@ -325,3 +325,64 @@ def test_span_problem_rechecks_a_trimmed_clip():
     assert ranking.span_problem(tease, 0, 99) is None
     assert ranking.span_problem(tease, 20, 99) == "outside the clip"
     assert ranking.span_problem(None, 0, 99) == "no line"
+
+
+def _paused(w, *sentence_ends, gap=0.5):
+    """Open a `gap` s pause after each listed sentence-final word."""
+    for i in sentence_ends:
+        for later in w[i + 1:]:
+            later["start"] += gap
+            later["end"] += gap
+    return w
+
+
+def test_an_end_index_that_opens_a_sentence_is_read_as_exclusive():
+    """§6.7: 17 of 22 real end indices were the next line's first word."""
+    w = _paused(words(200), 29, 39)
+    kept, _ = ranking.post_process([Candidate(1, 0, 30)], w)
+    c = kept[0]
+    assert c.end_word == 29, "ended on the sentence before, not after the next one"
+    assert (c.as_dict()["model_start_word"], c.as_dict()["model_end_word"]) == (0, 30)
+    assert "opened the next sentence" in c.boundary_notes[0]
+    single = ranking.snap(Candidate(1, 30, 30), ranking.sentence_starts(w), ranking.sentence_ends(w), len(w))
+    assert (single.start_word, single.end_word) == (30, 39), "a one-word span is left alone"
+
+
+def test_trailing_off_is_not_a_sentence_end():
+    w = words(30)
+    w[4]["word"] = "w4..."
+    w[9]["word"] = "w9…"
+    assert ranking.sentence_ends(w) == [19, 29] and ranking.sentence_starts(w) == [0, 20]
+    assert 5 not in ranking.phrase_starts(w)
+    assert "w4...\n[5] w5" in ranking.build_transcript(w), "the model's transcript is unchanged"
+
+
+def test_a_run_on_end_extends_to_the_next_pause_within_two_sentences():
+    w = _paused(words(200), 49)  # 39 -> 40 has no pause; 49 -> 50 has 0.5 s
+    kept, _ = ranking.post_process([Candidate(1, 0, 39)], w)
+    assert kept[0].end_word == 49 and kept[0].end == pytest.approx(w[49]["end"])
+    assert "extended 10 words" in kept[0].boundary_notes[-1]
+
+
+def test_a_speaker_change_is_a_pause():
+    w = words(200)
+    for i, x in enumerate(w):
+        x["speaker"] = "A" if i < 40 else "B"
+    kept, _ = ranking.post_process([Candidate(1, 0, 29)], w)
+    assert kept[0].end_word == 39
+
+
+def test_a_run_on_past_two_sentences_or_the_range_keeps_the_end_and_is_noted():
+    w = _paused(words(400), 69)
+    kept, _ = ranking.post_process([Candidate(1, 0, 29)], w)
+    assert kept[0].end_word == 29 and "4 sentences later" in kept[0].boundary_notes[-1]
+    w = _paused(words(400), 39)
+    kept, _ = ranking.post_process([Candidate(1, 0, 29)], w, max_duration_s=13.0)
+    assert kept[0].end_word == 29 and "exceed the duration range" in kept[0].boundary_notes[-1]
+
+
+def test_a_line_end_that_opens_a_sentence_is_exclusive_too():
+    kept, _ = ranking.post_process(ranking.parse_candidates(json.dumps(
+        {"candidates": [_item(0, 99, tease_start_word=10, tease_end_word=20)]})), words(200))
+    assert (kept[0].tease["start_word"], kept[0].tease["end_word"]) == (10, 19)
+    assert kept[0].tease["model_end_word"] == 20

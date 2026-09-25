@@ -148,6 +148,11 @@ DEAD_AIR_XFADE_S = 0.025  # audio crossfade at each join, against clicks
 ZOOM_FACTOR = 1.15        # punch-in scale for face-centred and centre crops
 ZOOM_MIN_HOLD_S = 3.0     # every framing holds this long: at most one switch per 3 s [I]
 ZOOM_PAUSE_S = 1.5        # pause that triggers a zoom when dead-air removal is off
+# The last speaker's S4 turn running past the last aligned word by more than
+# OVERRUN_MIN_S, with no word before the turn ends, is speech the aligner
+# squeezed (PLAN.md §6.7): the clip end follows the turn, at most OVERRUN_MAX_S.
+OVERRUN_MIN_S = 0.3
+OVERRUN_MAX_S = 0.8
 
 # Where S8 writes previews inside a source workdir. A session can point new
 # renders at a fresh folder so earlier previews stay for comparison.

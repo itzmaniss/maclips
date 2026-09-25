@@ -29,35 +29,36 @@ def graph_of(cmd):
 
 
 def test_line_plays_first_then_the_whole_clip_with_a_flash_cut(tmp_path, monkeypatch):
-    source, commands, asses = fake_ffmpeg(monkeypatch, tmp_path, lambda cmd: 13.88)
+    source, commands, asses = fake_ffmpeg(monkeypatch, tmp_path, lambda cmd: 14.0)
     result = render.render_clip(source, source, clip(cold_open="tease", end_card=True),
                                 SPEECH, PLAN, tmp_path / "c.mp4")
-    assert result["cold_open"] == {"mode": "tease", "source": pytest.approx([25.02, 26.9]),
-                                   "duration_s": pytest.approx(1.88), "text": "w10 w11 w12 w13"}
-    assert result["planned_duration_s"] == pytest.approx(13.88), "line + full clip"
+    # The line is padded like a clip edge (half of each 0.1 s gap), then half-frame snapped.
+    assert result["cold_open"] == {"mode": "tease", "source": pytest.approx([24.94, 26.94]),
+                                   "duration_s": pytest.approx(2.0), "text": "w10 w11 w12 w13"}
+    assert result["planned_duration_s"] == pytest.approx(14.0), "line + full clip"
     cmd = commands[0]
     assert cmd[cmd.index("-ss") + 1] == "20.000000"
     graph = graph_of(cmd)
     # The line (half-frame grid), then the clip from its first word, in order.
-    assert "[source0]trim=start=5.020000:end=6.900000" in graph
+    assert "[source0]trim=start=4.940000:end=6.940000" in graph
     assert "[source1]trim=start=0.000000:end=4.020000" in graph
     assert "[source2]trim=start=4.020000:end=12.000000,setpts=PTS-STARTPTS,crop=526:938" in graph
     # One white frame on the clip's first frame only; the line is never zoomed.
     assert graph.count("drawbox") == 1 and "crop=606:1080:656:0,scale=540:960" + render.FLASH in graph
     assert [p["zoomed"] for p in result["pacing"]["pieces"]] == [False, False, True]
-    assert result["pacing"]["switches"] == pytest.approx([5.88])
+    assert result["pacing"]["switches"] == pytest.approx([6.0])
     # Audio follows the same order, crossfaded at the join against a click.
-    assert "[1:a]asplit=2" in graph and "atrim=start=5.020000:end=6.925000" in graph
+    assert "[1:a]asplit=2" in graph and "atrim=start=4.940000:end=6.965000" in graph
     assert "acrossfade=n=2:d=0.025" in graph
     events = caption_events(asses[0])
-    assert events[0][0] == 0 and events[-1][1] == pytest.approx(13.88)
+    assert events[0][0] == pytest.approx(0.06) and events[-1][1] == pytest.approx(14.0)  # first word after the pad
     for (_, b0, _), (a1, _, _) in zip(events, events[1:]):
         assert a1 == pytest.approx(b0), "captions continuous across the cold-open join"
     assert "Dialogue: 1,0:00:00.00,0:00:03.00,Hook" in asses[0]
     # A fresh caption phrase starts at the join: no line word is shown after it.
-    after = [line for line in asses[0].splitlines() if line.startswith("Dialogue: 0,0:00:01.88")]
+    after = [line for line in asses[0].splitlines() if line.startswith("Dialogue: 0,0:00:02.00")]
     assert after and all(f"w1{i}" not in line for line in after for i in range(4))
-    assert f"Dialogue: 1,{render._ass_time(10.88)},{render._ass_time(13.88)},EndCard" in asses[0]
+    assert f"Dialogue: 1,{render._ass_time(11.0)},{render._ass_time(14.0)},EndCard" in asses[0]
 
 
 def test_payoff_mode_and_dead_air_cuts_inside_the_main_clip(tmp_path, monkeypatch):
@@ -68,8 +69,8 @@ def test_payoff_mode_and_dead_air_cuts_inside_the_main_clip(tmp_path, monkeypatc
         render.render_clip(source, source, clip(cold_open="payoff", payoff=payoff, end=33),
                            speech, {"kind": "letterbox"}, tmp_path / "p.mp4")
     graph = graph_of(commands[0])
-    # The payoff line (source 30.02-31.9 s, input seek 20.02 s), then both keeps in order.
-    assert graph.index("[source0]trim=start=10.000000:end=11.880000") < graph.index("[source1]trim=start=0.000000:end=6.000000")
+    # The padded payoff line (source 29.94-31.94 s, input seek 20.02 s), then both keeps in order.
+    assert graph.index("[source0]trim=start=9.920000:end=11.920000") < graph.index("[source1]trim=start=0.000000:end=6.000000")
     assert "[source2]trim=start=6.880000:end=13.000000" in graph
     assert "asplit=3" in graph, "line + two keeps around the cut"
     events = caption_events(asses[0])
@@ -81,14 +82,14 @@ def test_split_margins_follow_the_combined_timeline(tmp_path, monkeypatch):
     plan = {"kind": "split", "speaker_changes": [], "segments": [
         {"start": 20, "end": 26, "kind": "face-centred", "x": .3, "y": .3},
         {"start": 26, "end": 32, "kind": "split", "boxes": [[.1, .2, .1, .2], [.7, .2, .1, .2]]}]}
-    source, _, asses = fake_ffmpeg(monkeypatch, tmp_path, lambda cmd: 13.88)
+    source, _, asses = fake_ffmpeg(monkeypatch, tmp_path, lambda cmd: 14.0)
     render.render_clip(source, source, clip(cold_open="tease", zoom=False), SPEECH, plan, tmp_path / "s.mp4")
     events = caption_events(asses[0])
     # The line straddles the 26 s shot change: bottom, then seam, then the clip restarts at the bottom.
     assert {m for a, b, m in events if b <= 1.0} == {230}
-    assert {m for a, b, m in events if 1.0 <= a and b <= 1.88} == {880}
-    assert {m for a, b, m in events if 1.88 <= a and b <= 7.9} == {230}
-    assert {m for a, b, m in events if a >= 7.9} == {880}
+    assert {m for a, b, m in events if 1.1 <= a and b <= 2.0} == {880}
+    assert {m for a, b, m in events if 2.0 <= a and b <= 8.0} == {230}
+    assert {m for a, b, m in events if a >= 8.02} == {880}  # shot change on the half-frame grid
 
 
 def test_off_and_missing_render_the_same_command(tmp_path, monkeypatch):
@@ -114,7 +115,8 @@ def test_an_unplayable_line_stops_before_encoding(tmp_path, monkeypatch, extra, 
 
 def test_final_duration_gate_uses_the_combined_duration(tmp_path, monkeypatch):
     source, commands, _ = fake_ffmpeg(monkeypatch, tmp_path)
-    with pytest.raises(render.RenderError, match="edited duration 13.880s outside 5–13s"):
+    # The gate sees 13.9 s: the 14.0 s combined timeline less the line's 0.1 s of pad.
+    with pytest.raises(render.RenderError, match="edited duration 13.900s outside 5–13s"):
         render.render_clip(source, source, clip(cold_open="tease"), SPEECH, PLAN, tmp_path / "f.mp4",
                            proxy=False, duration_range=(5, 13))
     assert commands == []

@@ -233,6 +233,8 @@ def test_version_bump_forces_recompute(tmp_path):
     assert STAGES_BY_ID["S7"].version >= 4 and STAGES_BY_ID["S8"].version >= 4
     assert STAGES_BY_ID["S12"].version >= 3 and "S4" in STAGES_BY_ID["S7"].needs
     assert STAGES_BY_ID["S8"].version >= 6 and STAGES_BY_ID["S12"].version >= 5  # padded clip edges
+    assert (STAGES_BY_ID["S5"].version, STAGES_BY_ID["S7"].version) >= (3, 5)  # end-boundary fixes
+    assert STAGES_BY_ID["S8"].version >= 7 and STAGES_BY_ID["S12"].version >= 6
 
 
 def test_end_card_is_timed_against_the_edited_end(tmp_path, monkeypatch):
@@ -277,3 +279,39 @@ def test_render_pads_clip_edges_and_stretches_saved_segments(tmp_path, monkeypat
     assert cmd[cmd.index("-ss") + 1] == "9.880000"
     assert "[1:a]atrim=duration=6.240000" in graph
     assert "trim=start=0.000000:end=2.620000" in graph and "trim=start=2.620000:end=6.240000" in graph
+
+
+def test_speech_overrun_follows_a_turn_that_outlasts_the_last_word():
+    # Video 3 candidate 11: "0.1%." aligned 4004.966-4005.226, turn to 4005.97, next word 4007.302.
+    words = [w("top", 4004.646, 4004.846), w("0.1%.", 4004.966, 4005.226), w("So", 4007.302, 4007.422)]
+    turns = [{"start": 3996.08, "end": 4005.97, "speaker": "SPEAKER_01"},
+             {"start": 4007.2, "end": 4015.5, "speaker": "SPEAKER_00"}]
+    overrun = pacing.speech_overrun(words, turns, 1)
+    assert overrun["to"] == pytest.approx(4005.97) and overrun["speaker"] == "SPEAKER_01"
+    long_turn = [{**turns[0], "end": 4006.5}]
+    assert pacing.speech_overrun(words, long_turn, 1)["to"] == pytest.approx(4005.226 + 0.8)  # capped
+    short = [{**turns[0], "end": 4005.4}]
+    assert pacing.speech_overrun(words, short, 1) is None, "0.17 s is pyannote's own margin"
+    into_next = [{**turns[0], "end": 4007.5}]
+    assert pacing.speech_overrun(words, into_next, 1) is None, "the turn reaches a transcribed word"
+    assert pacing.speech_overrun(words, turns, None) is None
+
+
+def test_render_extends_to_the_overrun_and_gates_without_the_pads(tmp_path, monkeypatch):
+    source, commands, _ = fake_ffmpeg(monkeypatch, tmp_path, lambda cmd: 6.84)
+    words = [w("x", 9.0, 9.5)] + WORDS + [w("y", 18.0, 18.5)]
+    plan = {**PLAN, "speech_overrun": {"from": 16.0, "to": 16.6, "turn_end": 16.6, "speaker": "A"}}
+    result = render.render_clip(source, source, {"start": 10.0, "end": 16.0, "dead_air": False, "zoom": False},
+                                words, plan, tmp_path / "o.mp4")
+    assert result["source_span_s"] == pytest.approx(6.84)  # 0.12 pads around 6.6 s of speech
+    assert result["edge_padding_s"] == pytest.approx(0.12 + 0.12) and result["speech_overrun"]["to"] == 16.6
+    assert result["timeline"] == [[0.0, pytest.approx(9.88), pytest.approx(16.72)]]
+    # A trimmed end no longer matches the overrun's word, so it is ignored.
+    monkeypatch.setattr(render.ffmpeg, "probe", lambda path: {"width": 540, "height": 960, "has_video": True,
+                                                              "has_audio": True, "duration_s": 5.62})
+    trimmed = render.render_clip(source, source, {"start": 10.0, "end": 15.5, "dead_air": False, "zoom": False},
+                                 words, plan, tmp_path / "t.mp4")
+    assert trimmed["speech_overrun"] is None and trimmed["timeline"][0][2] == pytest.approx(15.5)
+    with pytest.raises(render.RenderError, match=r"edited duration 6\.600s outside 7–180s"):
+        render.render_clip(source, source, {"start": 10.0, "end": 16.0, "dead_air": False, "zoom": False},
+                           words, plan, tmp_path / "g.mp4", duration_range=(7, 180))

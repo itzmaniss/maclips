@@ -452,9 +452,11 @@ def s7_attribution(ctx: RunContext) -> StageOutput:
     Every plan also carries `speaker_changes`, the punch-in zoom's speaker
     trigger: times where S4's window label changes between words. S3's
     checkpointed words carry no labels, so they are re-derived from the turns
-    S4 checkpoints. No face is attributed to a speaker.
+    S4 checkpoints. No face is attributed to a speaker. A plan also carries
+    `speech_overrun` when the last speaker's turn outlasts the last word (§6.7).
     """
     from .layouts import plan_layouts, speaker_changes
+    from .pacing import speech_overrun
     plans = plan_layouts(ctx.output("S6")["analysis"])
     windows = ctx.outputs.get("S4", {}).get("windows") or []
     words = ctx.output("S3")["words"]
@@ -462,8 +464,11 @@ def s7_attribution(ctx: RunContext) -> StageOutput:
         window = next((w for w in windows if abs(w["start"] - c["start"]) < 1e-6
                        and abs(w["end"] - c["end"]) < 1e-6), None)
         changes = speaker_changes(words, window["turns"]) if window else []
+        overrun = speech_overrun(words, window["turns"], c.get("end_word")) if window else None
         for plan in plans.get(str(c["rank"]), {}).values():
             plan["speaker_changes"] = changes
+            if overrun:
+                plan["speech_overrun"] = overrun
     return {"plans": plans,
             "follow_crop_blocked": [c["rank"] for c in ctx.output("S5")["candidates"]]}
 
@@ -549,7 +554,8 @@ STAGES: tuple[StageSpec, ...] = (
     # S5 before S4: diarization is window-only and needs the candidate spans.
     StageSpec("S5", "rank", "Sonnet ranks candidates", s5_rank,
               # v2: approved prompt, hook_strength, tease/payoff lines (2026-09-25).
-              needs=("S1", "S3"), version=2,
+              # v3: exclusive end index, "..." not an end, run-on extension (§6.7).
+              needs=("S1", "S3"), version=3,
               params=("stub_candidates", "stub_malformed_json", "candidate_count", "clip_min_duration", "clip_max_duration"),
               gate="Malformed JSON after one retry; fewer than 5 candidates survive"),
     StageSpec("S4", "diarize", "pyannote community-1 on candidate windows", s4_diarize,
@@ -561,13 +567,15 @@ STAGES: tuple[StageSpec, ...] = (
               gate="Video stream did not finish downloading; candidate with no face track is letterbox-only"),
     StageSpec("S7", "attribution", "Static shot layouts; attribution deferred", s7_attribution,
               # v4: face y/box and speaker_changes for the punch-in zoom (2026-09-25c).
-              needs=("S6", "S4"), version=4,
+              # v5: speech_overrun from the last speaker's turn (§6.7).
+              needs=("S6", "S4"), version=5,
               gate="Low attribution confidence blocks follow-crop for that clip"),
     StageSpec("S8", "proxy-render", "540x960 videotoolbox previews", s8_proxy_render,
               # v4: dead-air removal and punch-in zoom in the render (2026-09-25c).
               # v5: optional cold open on the combined timeline (2026-09-25).
               # v6: clip edges padded into the neighbouring silence (§6.7).
-              needs=("S7",), version=6, gate="Posted clips cannot be regenerated"),
+              # v7: speech overrun, padded cold-open line, playhead timeline (§6.7).
+              needs=("S7",), version=7, gate="Posted clips cannot be regenerated"),
     StageSpec("S9", "review", "Human selection and trimming", s9_review,
               needs=("S8",), params=("approvals",), gate="Human gate by definition"),
     StageSpec("S10", "commentary", "Resolve commentary text", s10_commentary,
@@ -576,7 +584,7 @@ STAGES: tuple[StageSpec, ...] = (
               needs=("S10",), version=2,
               gate="Any mechanical failure blocks the clip"),
     StageSpec("S12", "final-render", "One-pass 1080x1920 libx264 encode", s12_final_render,
-              needs=("S11",), version=5,  # v5: padded clip edges (§6.7); v4: combined cold-open duration; v3: post-cut, 2026-09-25c
+              needs=("S11",), version=6,  # v6: overrun, padded line, gate without pads; v5: padded clip edges (§6.7); v4: combined cold-open duration; v3: post-cut, 2026-09-25c
               gate="Edited duration outside the brief's range; duration drift > 0.1s "
                    "against the edited plan; wrong resolution; no audio stream"),
     StageSpec("S13", "export-bundle", "MP4 + caption.txt + checklist.md", s13_export_bundle,

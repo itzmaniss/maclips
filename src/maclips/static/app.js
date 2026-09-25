@@ -120,7 +120,10 @@ if (editor) {
       const current = links.findIndex(link => link.classList.contains('selected'));
       links[current+(key === 'j' ? 1 : -1)]?.click();
     } else {
-      const sourceTime = Number(editor.dataset.start)+video.currentTime;
+      // Map the playhead through the played intervals (cuts, cold open, edge pads).
+      const t = video.currentTime, timeline = JSON.parse(editor.dataset.timeline || '[]');
+      const piece = timeline.find(([at,a,b]) => t < at+b-a) || timeline[timeline.length-1];
+      const sourceTime = piece ? piece[1]+Math.min(Math.max(t-piece[0],0),piece[2]-piece[1]) : Number(editor.dataset.start)+t;
       const words = [...document.querySelectorAll('.word')].filter(w => Number.isFinite(Number(w.dataset.start)));
       const nearest = words.reduce((best,word) => !best || Math.abs(Number(word.dataset.start)-sourceTime)<Math.abs(Number(best.dataset.start)-sourceTime) ? word : best, null);
       if (nearest) { changeMode(key === '[' ? 'in' : 'out'); nearest.click(); }
