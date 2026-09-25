@@ -166,3 +166,28 @@ def test_sonnet_5_cost_is_the_single_settled_rate():
     assert config.estimated_cost_usd("anthropic/claude-sonnet-5", 1_000_000, 0) == 2.0
     assert config.estimated_cost_usd("anthropic/claude-sonnet-5", 0, 1_000_000) == 10.0
     assert not hasattr(config, "DISPUTED_RATES_USD_PER_MTOK")
+
+
+def test_local_ranking_model_routes_to_the_mlx_server_with_thinking(monkeypatch):
+    """The MLX slot: api_base, no key, no Anthropic effort/schema, thinking via the template."""
+    import litellm
+    from maclips import config
+    sent = {}
+
+    class Reply:
+        choices = [type("C", (), {"finish_reason": "stop",
+                                  "message": type("M", (), {"content": '{"candidates": []}'})()})()]
+        usage = None
+
+    def fake(**kwargs):
+        sent.update(kwargs)
+        return Reply()
+
+    monkeypatch.setattr(litellm, "completion", fake)
+    monkeypatch.setattr(config, "LOCAL_LLM_ENABLED", True)
+    monkeypatch.setattr(config, "RANKING_MODEL", "openai/mlx-community/gemma-4-26B-A4B-it-qat-4bit")
+    assert llm.rank_fn("rank this") == '{"candidates": []}'
+    assert sent["api_base"] == config.LOCAL_LLM_API_BASE and sent["api_key"] == "not-needed"
+    assert sent["extra_body"] == {"chat_template_kwargs": {"enable_thinking": True}}
+    assert "reasoning_effort" not in sent and "output_config" not in sent
+    assert sent["timeout"] == config.LOCAL_LLM_TIMEOUT_S

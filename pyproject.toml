@@ -13,6 +13,7 @@ dependencies = [
     "jsonschema==4.26.0",
     "litellm==1.102.0",
     "mlx==0.32.2",
+    "mlx-lm>=0.31.3",
     "playwright>=1.63.0",
     "pyannote-audio==4.0.7",
     "pyobjc-framework-vision==12.2.2",

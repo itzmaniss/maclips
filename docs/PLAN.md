@@ -1,6 +1,7 @@
 # Clipping Funnel — Build Plan
 
 Target: single Apple Silicon machine (M4 Pro, 32 GB unified memory), macOS only. Plan date: 2026-09-20.
+**Corrected 2026-09-25 [V]:** `sysctl hw.memsize` reports 51,539,607,552 bytes, so the machine has **48 GB**, not 32 GB (M4 Pro confirmed).
 
 **Epistemic labels used throughout**
 
@@ -1520,6 +1521,67 @@ designed, at S9 ("awaiting review; no clips approved yet").
   $0.043854 and Phase 3 $0.104646. There were no retries and no gate
   firings. The ledger and raw replies are in `work/session-20260925a/`.
 
+### 5.2h Ranking bake-off on video 3, session 2026-09-25 [V]
+
+The user approved a four-arm bake-off on video 3 (DZtGxNs9AVg). Every arm
+used the same `PROMPT` and transcript (72,946 characters) and the Phase-1
+post-processing (§6.7). Evidence is in `work/session-20260925-bakeoff/`:
+`arm-*.json`, the `raw-*` replies, `server-*.log`, `mem-*.log` and
+`timings.json`.
+
+| Arm | Model | Returned / kept | ≥5 gate | JSON attempts | Tokens in / out | Cost or wall | Peak memory |
+|---|---|---|---|---|---|---|---|
+| A | Sonnet 5, low effort (cached reply) | 11 / 11 | pass | 1 | 24,827 / 1,607 | $0 now ($0.0657 when first run) | — |
+| B | Sonnet 5, **high** effort | 12 / 12 | pass | 1 | 24,827 / 21,240 (19,508 thinking) | **$0.2621**, 210.9 s | — |
+| C | `gemma-4-26B-A4B-it-qat-4bit`, local, thinking on | 12 / 8 (4 too short) | pass | **2** | 21,869 / 11,166, then 21,897 / 8,895 | 507 s over both calls | 19 GB footprint, 7.2 GB RSS [see note] |
+| D | `gemma-4-E4B-it-qat-4bit`, local, thinking on | 12 / 9 (3 too short) | pass | **2** | 21,869 / 3,957, then 21,897 / 3,742 | 254 s over both calls | 9.5 GB footprint, 6.5 GB RSS |
+
+- **Session spend: $0.26** (B only), against the $0.60 cap. The projection
+  printed before the call was $0.134 expected and $0.376 worst case, so the
+  one call fitted. No retry was needed.
+- **Local throughput** (`mlx_lm.server`, mlx-lm 0.31.3, mlx 0.32.2):
+  - C: prefill at 585 and 666 tok/s; generation at 45.7 and 46.2 tok/s.
+  - D: prefill at 1,072 and 1,161 tok/s; generation at 35.9 tok/s. The MoE
+    26B-A4B generates faster than the dense-per-layer E4B.
+- Memory is the `top` MEM (physical footprint) of the server process, sampled
+  every 2 s. **C's sampler started after its first prefill** (the first
+  sampler watched the `uv` wrapper by mistake), so C's peak may be
+  understated. D was sampled throughout.
+- **JSON.** mlx-lm 0.31.3's server ignores `response_format`. Both local arms
+  first returned a bare JSON array (and D added a Markdown fence), which
+  `parse_candidates` rejects ("missing a top-level 'candidates' array").
+  Both passed on the one retry, so the existing path held.
+- **Fit check before download [V].** 48 GB RAM and 270 GB free disk. The 26B
+  weights are 15.6 GB. The KV cache for ~22k Gemma tokens is about 1.2 GB
+  [I]: 5 full-attention layers with 2 KV heads × 512, and 25 sliding
+  layers with a 1,024-token window. So 26B ran, and E4B (6.8 GB) was not
+  needed as a fallback. D ran because C was on 26B and D cost 1 m 26 s to
+  download plus 4 m 14 s to run.
+- **Spans.** Median kept duration: A 67 s, B 65 s, C 35 s, D 27 s. The local
+  models pick short spans, several under the 10 s floor. Cold-open lines that
+  pass the checks: A 2, B 5, C 8, D 5.
+- **Blind sheet.** 40 kept clips were pooled into **22 entries**; 18 merged
+  where two clips overlap by more than 50% of the shorter one.
+  - Sheet: `work/session-20260925-bakeoff/bakeoff-blind-sheet.md`.
+  - Previews: `work/7f8b3b5213024774/bakeoff/blind/Bnn.mp4`.
+  - The key, `bakeoff-blind-key.json`, was written by script and not opened;
+    it lists every arm that picked each entry.
+  - The burned-in hook on a merged entry comes from the arm whose render is
+    shown, so a hook's style can hint at the arm.
+- **Render isolation.** Each arm rendered through `maclips run … --from S5`
+  in a scratch workdir (`wd-<arm>`) with a scratch DB, the S5 call replayed
+  from the saved replies, and `litellm.completion` set to abort. The live
+  video-3 checkpoints, `previews-endfix/` and the Review DB were not touched.
+  S4 took about 37 s and S6 about 136 s per arm.
+- **Found: an S8 stop unrelated to ranking [V].** Arm D's candidate 1
+  (22.4–26.7 s) has a split plan whose Vision face boxes run past the bottom
+  edge (y+h = 1.10 and 1.14). `render._box` raises "face box lies outside
+  source", which stops S8 for the **whole source**, not just that clip.
+  `render_d_fallback.py` rendered D clip by clip, and that clip fell back to
+  letterbox. Not fixed: S6/S7 should clamp the boxes, or S8 should fail
+  per clip. The user decides.
+- No winner is declared. The user rates the blind sheet.
+
 ### 5.2d Brief extraction fix, 2026-09-23 [V]
 
 **Diagnosis first.** Each of the 8 captured files was checked for the
@@ -2688,6 +2750,12 @@ are padded (`c44a6a1`). The five end-boundary fixes and both side-effect
 fixes are built and re-run on cached replies with no spend (§6.7). The
 remaining mid-speech endings are video 2's fast speaker (capped runs, noted in
 Review) and bare fragments such as "I think.", which have no rule yet.
+
+**Session 2026-09-25 bake-off status [V]:** four ranking arms on video 3 are
+built and rendered, and one pooled blind sheet waits for the user (§5.2h).
+Spend was $0.26 of the $0.60 cap. mlx-lm is now a dependency, and the local
+slot routes S5 when `MACLIPS_LOCAL_LLM_ENABLED=true` and
+`MACLIPS_RANKING_MODEL=openai/<model>`.
 
 **Critical path to first earnings:** 1 → 2 → 4 → 5 → 6, with 3 and 8 in parallel.
 

@@ -34,6 +34,7 @@ def complete(
 
     model = model or config.RANKING_MODEL
     secrets = config.Secrets.load()
+    local = model.startswith("openai/") and config.LOCAL_LLM_ENABLED
 
     kwargs: dict = {
         "model": model,
@@ -42,7 +43,7 @@ def complete(
     }
     if temperature is not None:
         kwargs["temperature"] = temperature
-    if reasoning_effort is not None:
+    if reasoning_effort is not None and not local:
         # LiteLLM 1.102.0 maps "low" on Sonnet 5 to adaptive thinking plus
         # output_config.effort (§5.2c). "none" sends nothing at all, which
         # leaves Sonnet 5 thinking at its default high effort.
@@ -61,10 +62,15 @@ def complete(
         # JSON-only is enforced by the prompt and the caller's parser.
         kwargs["response_format"] = {"type": "json_object"}
 
-    if model.startswith("openai/") and config.LOCAL_LLM_ENABLED:
-        # The mlx-lm server is OpenAI-compatible and needs no real key.
+    if local:
+        # The mlx-lm server is OpenAI-compatible and needs no real key. It has
+        # no effort setting and ignores response_format (mlx-lm 0.31.3), so
+        # the caller's parse-and-retry path is what enforces JSON.
         kwargs["api_base"] = config.LOCAL_LLM_API_BASE
         kwargs["api_key"] = "not-needed"
+        kwargs["timeout"] = config.LOCAL_LLM_TIMEOUT_S
+        if reasoning_effort is not None and config.LOCAL_LLM_THINKING:
+            kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": True}}
     else:
         kwargs["api_key"] = secrets.require_anthropic()
 

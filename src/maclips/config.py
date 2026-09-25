@@ -44,11 +44,16 @@ TOKEN_RATES_USD_PER_MTOK = {
 # Optional local MLX LLM (PLAN.md "MLX: where and where not")
 # --------------------------------------------------------------------------- #
 # A config slot only. mlx-lm serves an OpenAI-compatible endpoint, so LiteLLM
-# reaches it as an "openai/..." model with a custom api_base. No model is
-# installed and nothing routes here until it is switched on deliberately.
+# reaches it as an "openai/..." model with a custom api_base. Nothing routes
+# here until MACLIPS_LOCAL_LLM_ENABLED is set and a model is named "openai/..."
+# (the §5.2h bake-off pointed MACLIPS_RANKING_MODEL at it).
 LOCAL_LLM_ENABLED = os.getenv("MACLIPS_LOCAL_LLM_ENABLED", "false").lower() == "true"
 LOCAL_LLM_MODEL = os.getenv("MACLIPS_LOCAL_LLM_MODEL", "")
 LOCAL_LLM_API_BASE = os.getenv("MACLIPS_LOCAL_LLM_API_BASE", "http://127.0.0.1:8080/v1")
+# Thinking is switched on through the chat template (mlx_lm.server's
+# per-request chat_template_kwargs); a local model can take many minutes.
+LOCAL_LLM_THINKING = os.getenv("MACLIPS_LOCAL_LLM_THINKING", "true").lower() == "true"
+LOCAL_LLM_TIMEOUT_S = float(os.getenv("MACLIPS_LOCAL_LLM_TIMEOUT_S", "3600"))
 
 # --------------------------------------------------------------------------- #
 # Diarization
