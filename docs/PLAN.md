@@ -1990,6 +1990,62 @@ margin, as plan validation.
 **old** plans and previews. `--from S7` forces a recompute; so does bumping S7
 and S8 to version 4, which is recommended.
 
+**Session 2026-09-25b, phase 2: re-render and real-output check [V].**
+S7 and S8 were re-run on all three sources with no model call. A wrapper
+removed the API key and made `litellm.completion` raise. Before anything ran,
+it required every stage ahead of S7 to hit its checkpoint under the real cache
+key.
+- **Videos 2 and 3:** `maclips run <url> --clip-class general-own --language en
+  --candidates 12 --from S7`. S0–S6 (including S5) were cached, and each run
+  stopped at the S9 human gate as expected.
+- **Benchmark:** `maclips render-review
+  work/session-20260923g/benchmark-face-manifest.json`, the same path as
+  before. That command has no `--from`, so the old S7 and S8 checkpoints were
+  moved aside and S6 loaded from cache.
+
+| Source | Previews | S8 wall (before → after) | Split clips | Split samples with exactly one face in *both* panels |
+|---|---:|---:|---:|---:|
+| Benchmark | 24 | 127.52 s → **137.38 s** | 3 (cands 1, 2, 10) | 59 / 60 |
+| Video 2 | 22 | 56.19 s → **56.77 s** | 1 (cand 10) | 4 / 4 |
+| Video 3 | 24 | 175.47 s → **191.92 s** | 7 (cands 1, 5, 8, 9, 10, 11, 12) | 140 / 141 |
+
+*Method.* One sample per second inside each split segment, with Apple Vision
+run separately on the top and bottom 540×480 panels. Per clip:
+- Benchmark cand 1: 20/20. Cand 2: 12/12. Cand 10: 27/28.
+- Video 2 cand 10: 4/4.
+- Video 3 cand 1: 15/15. Cand 5: 13/13. Cand 8: 25/25. Cand 9: 39/39.
+  Cand 10: 23/24. Cand 11: 16/16. Cand 12: 9/9.
+
+**No sample had 2 or more faces in either panel.** Two samples had 0 faces in
+the top panel:
+- benchmark cand 10 at 83 s: the person is turned away with arms raised;
+- video 3 cand 10 at 1.5 s: a hand covers the mouth.
+
+Both panels still show the correct person (`work/session-20260925b/after-fix-samples.png`).
+
+*Captions.* The longest inter-word pause in any video 3 clip is cand 10,
+78.12–82.08 s (3.96 s). Across it, frames were sampled every 0.1 s and
+highlighted-caption pixels counted in the caption band. The caption was
+present in **40/40** frames of the new preview, against **1/40** in the
+pre-fix preview (`caption-pause-{new,old}.png`).
+
+*Upscale (960 / crop height).* Benchmark 0.79–0.91, which is a downscale.
+Video 2: 1.09–1.16. Video 3: 1.09–1.17. The worst case is 1.17, video 3
+cand 8 (bottom panel `924:820`).
+
+*Previews.* The new previews are in `…/previews/`; the old ones are kept in
+`…/previews-before-fix/` in `work/7899e5b0d2733cfe`, `work/7f8b3b5213024774`
+and `work/session-20260923g/benchmark-face-renders`. The old S7 and S8
+checkpoints are in `work/session-20260925b/old-checkpoints/`.
+
+*Seen, not fixed (out of scope) [V].*
+- In face-centred shots of the screen share, the bottom caption can sit over
+  the webcam inset.
+- The 3-second hook sits at the top and overlays the top panel's face in split
+  shots.
+
+Whether any of the layouts is right is still the user's call.
+
 ## 7. Campaign workflow
 
 ### 7.1 Lifecycle
@@ -2088,6 +2144,11 @@ through ranking (benchmark, video 2, video 3), but its "done when" is the
 user's judgement of the blind sheets, which is pending. Step 6 has run on
 three real sources through S8, and its acceptance is the user's judgement of
 the previews, also pending.
+
+**Session 2026-09-25b status [V]:** the user's two review defects are fixed.
+Captions now stay on screen continuously, and split panels no longer overlap.
+All three sources were re-rendered and checked by machine (§6.5). Step 5/6
+acceptance is still pending the user's judgement of the new previews.
 
 **Critical path to first earnings:** 1 → 2 → 4 → 5 → 6, with 3 and 8 in parallel.
 
