@@ -112,3 +112,17 @@ def test_checklist_names_end_card_only_when_on(tmp_path,monkeypatch,card):
     checklist=(Path(export.export_stage(ctx)['bundles'][0]['path'])/'checklist.md').read_text()
     assert ('- End card burned into the last 3 s: "Share this one"' in checklist)==card
     assert ('End card' in checklist)==card
+
+
+def test_rerank_refreshes_model_fields_but_keeps_human_edits(tmp_path):
+    with db.connect(tmp_path/'test.db') as conn:
+        sid=db.register_source(conn,'abc','source.mp4','general-own')
+        cid=db.save_candidate(conn,sid,'general-own',{'rank':1,'start':0,'end':30,'start_word':0,'end_word':20,'hook_text':'model'})
+        data=json.loads(conn.execute('SELECT data_json FROM clips WHERE id=?',(cid,)).fetchone()[0])
+        data.update(hook_text='human',cold_open='tease')
+        conn.execute('UPDATE clips SET data_json=? WHERE id=?',(json.dumps(data),cid))
+        again=db.save_candidate(conn,sid,'general-own',{'rank':1,'start':0,'end':30,'start_word':0,'end_word':20,
+                                                     'hook_text':'model','hook_strength':.7,'tease':{'start_word':2}})
+        data=json.loads(conn.execute('SELECT data_json FROM clips WHERE id=?',(cid,)).fetchone()[0])
+    assert again==cid and data['hook_strength']==.7 and data['tease']=={'start_word':2}
+    assert data['hook_text']=='human' and data['cold_open']=='tease'

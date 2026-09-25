@@ -135,7 +135,8 @@ def test_malformed_json_retries_once_then_stops():
     with pytest.raises(RankingError, match="after one retry"):
         ranking.rank(words(400), llm_fn=bad, count=5)
     assert len(calls) == 2, "exactly one retry"
-    assert "IMPORTANT" in calls[1], "the retry must tell the model what went wrong"
+    assert "could not be used (not valid JSON:" in calls[1], "the retry quotes the parse error"
+    assert "IMPORTANT" not in calls[1]
 
 
 def test_a_valid_retry_is_accepted():
@@ -214,9 +215,9 @@ def test_default_range_reaches_the_prompt_with_its_word_guidance():
         seen.append(prompt)
         return '{"candidates": []}'
 
-    with pytest.raises(ranking.RankingError):
-        ranking.rank(words(30), llm)
-    assert "Target 10-180 seconds. Roughly 25-450 words" in seen[0]
+    kept, meta = ranking.rank(words(30), llm)
+    assert meta["insufficient"] is True, "an empty reply is legal; the gate decides"
+    assert "Aim for\n  25-450 words (~10-180s at" in seen[0]
 
 
 def test_default_range_keeps_a_150_s_span_that_30_60_dropped():
@@ -226,7 +227,101 @@ def test_default_range_keeps_a_150_s_span_that_30_60_dropped():
 
 
 def test_prompt_describes_index_only_lines_and_asks_for_word_indices_only():
-    assert "begins with the word index of its first word, in square brackets" in ranking.PROMPT
+    assert "Each line begins with [n], the global word index of its" in ranking.PROMPT
     assert "@" not in ranking.PROMPT
     assert "end time minus" not in ranking.PROMPT
     assert "Refer to moments only by word index" in ranking.PROMPT
+    assert "Select up to {count} clips" in ranking.PROMPT
+
+
+# --------------------------------------------------------------------------- #
+# Approved prompt fields: hook_strength and the cold-open lines
+# --------------------------------------------------------------------------- #
+
+def _item(start, end, **extra):
+    base = {"start_word": start, "end_word": end, "hook_text": "h", "why": "w",
+            "topic": "t", "hook_strength": 0.5, "brief_flags": [],
+            "tease_start_word": start + 10, "tease_end_word": start + 14,
+            "payoff_start_word": start + 30, "payoff_end_word": start + 34}
+    return {**base, **extra}
+
+
+def test_schema_requires_every_approved_field():
+    item = ranking.RANKING_SCHEMA["properties"]["candidates"]["items"]
+    assert set(item["required"]) == {
+        "start_word", "end_word", "hook_text", "why", "topic", "hook_strength",
+        "brief_flags", "tease_start_word", "tease_end_word", "payoff_start_word",
+        "payoff_end_word"}
+    assert set(item["properties"]) == set(item["required"])
+    assert item["properties"]["hook_strength"] == {"type": "number"}
+    assert item["additionalProperties"] is False
+
+
+def test_hook_strength_out_of_range_is_stored_as_null_and_never_reorders():
+    payload = json.dumps({"candidates": [
+        _item(0, 99, hook_strength=0.2), _item(120, 219, hook_strength=1.7),
+        _item(240, 339, hook_strength=0.9), _item(360, 459, hook_strength="high"),
+        _item(480, 579, hook_strength=True)]})
+    kept, _ = ranking.rank(words(1000), llm_fn=lambda p: payload, count=5)
+    assert [c.rank for c in kept] == [1, 2, 3, 4, 5], "the model's order is the rank"
+    assert [c.hook_strength for c in kept] == [0.2, None, 0.9, None, None]
+    assert kept[0].as_dict()["hook_strength"] == 0.2
+
+
+def test_valid_tease_and_payoff_are_timed_and_carry_their_text():
+    """10-word sentences at 2.5 words/s are 4.0 s each: inside 1.5-4.0 s."""
+    kept, _ = ranking.post_process(ranking.parse_candidates(json.dumps(
+        {"candidates": [_item(0, 99, tease_start_word=12, tease_end_word=15)]})), words(200))
+    tease, payoff = kept[0].tease, kept[0].payoff
+    assert (tease["start_word"], tease["end_word"]) == (10, 19), "snapped outward to the sentence"
+    assert (tease["model_start_word"], tease["model_end_word"]) == (12, 15)
+    assert tease["problem"] is None and tease["duration"] == pytest.approx(4.0)
+    assert tease["text"].startswith("w10 ") and tease["text"].endswith("w19.")
+    assert payoff["problem"] is None and (payoff["start_word"], payoff["end_word"]) == (30, 39)
+
+
+def test_lines_snap_to_phrase_boundaries_not_only_sentences():
+    w = words(200)
+    w[13]["word"] = "w13,"
+    kept, _ = ranking.post_process(ranking.parse_candidates(json.dumps(
+        {"candidates": [_item(0, 99, tease_start_word=10, tease_end_word=12)]})), w)
+    assert (kept[0].tease["start_word"], kept[0].tease["end_word"]) == (10, 13)
+    assert kept[0].tease["duration"] == pytest.approx(1.6)
+
+
+@pytest.mark.parametrize("extra, problem", [
+    ({"tease_start_word": 5000, "tease_end_word": 5004}, "outside the clip"),
+    ({"tease_start_word": 15, "tease_end_word": 11}, "reversed"),
+    ({"tease_start_word": "ten", "tease_end_word": 14}, "missing"),
+    ({"tease_start_word": 10, "tease_end_word": 25}, "outside 1.5-4s"),
+])
+def test_an_invalid_line_disables_only_that_mode(extra, problem):
+    kept, dropped = ranking.post_process(ranking.parse_candidates(json.dumps(
+        {"candidates": [_item(0, 99, **extra)]})), words(200))
+    assert len(kept) == 1 and not any(dropped.values()), "the candidate survives"
+    assert problem in kept[0].tease["problem"]
+    assert kept[0].payoff["problem"] is None
+
+
+def test_overlapping_payoff_is_disabled_and_the_tease_kept():
+    kept, _ = ranking.post_process(ranking.parse_candidates(json.dumps(
+        {"candidates": [_item(0, 99, payoff_start_word=12, payoff_end_word=14)]})), words(200))
+    assert kept[0].tease["problem"] is None
+    assert kept[0].payoff["problem"] == "overlaps the tease"
+
+
+def test_a_line_short_of_1_5_s_is_disabled():
+    w = words(200)
+    w[11]["word"] = "w11,"   # phrase w10-w11: 0.8 s
+    kept, _ = ranking.post_process(ranking.parse_candidates(json.dumps(
+        {"candidates": [_item(0, 99, tease_start_word=10, tease_end_word=11)]})), w)
+    assert "0.80s is outside" in kept[0].tease["problem"]
+
+
+def test_span_problem_rechecks_a_trimmed_clip():
+    kept, _ = ranking.post_process(ranking.parse_candidates(json.dumps(
+        {"candidates": [_item(0, 99)]})), words(200))
+    tease = kept[0].tease
+    assert ranking.span_problem(tease, 0, 99) is None
+    assert ranking.span_problem(tease, 20, 99) == "outside the clip"
+    assert ranking.span_problem(None, 0, 99) == "no line"

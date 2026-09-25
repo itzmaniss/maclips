@@ -136,8 +136,12 @@ def save_candidate(conn, source_id, clip_class, candidate, previews=None):
     if row:
         # Replaying a cache must not reset human edits or decisions.
         data=json.loads(row["data_json"])
-        if previews is not None:
-            data["previews"]=previews
+        # Model-owned fields a re-rank may add; no human ever edits these.
+        model={k:candidate[k] for k in ("hook_strength","tease","payoff") if k in candidate}
+        if previews is not None or any(data.get(k)!=v for k,v in model.items()):
+            data.update(model)
+            if previews is not None:
+                data["previews"]=previews
             conn.execute("UPDATE clips SET data_json=? WHERE id=?",(json.dumps(data),row["id"]))
         return row["id"]
     data={**candidate,"previews":previews or {},"commentary_mode":"none"}

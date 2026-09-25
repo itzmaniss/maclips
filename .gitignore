@@ -50,3 +50,4 @@ venv/
 .claude/proven-config.json
 .claude/.proven-config-version
 .claude/settings.local.json
+.claude/worktrees/

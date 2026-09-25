@@ -548,7 +548,8 @@ STAGES: tuple[StageSpec, ...] = (
                    "language != expected"),
     # S5 before S4: diarization is window-only and needs the candidate spans.
     StageSpec("S5", "rank", "Sonnet ranks candidates", s5_rank,
-              needs=("S1", "S3"),
+              # v2: approved prompt, hook_strength, tease/payoff lines (2026-09-25).
+              needs=("S1", "S3"), version=2,
               params=("stub_candidates", "stub_malformed_json", "candidate_count", "clip_min_duration", "clip_max_duration"),
               gate="Malformed JSON after one retry; fewer than 5 candidates survive"),
     StageSpec("S4", "diarize", "pyannote community-1 on candidate windows", s4_diarize,

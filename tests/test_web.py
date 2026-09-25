@@ -199,3 +199,11 @@ def test_end_card_change_revokes_approval(studio,monkeypatch):
         assert row['review_decision'] is None and row['render_path'] is None
         assert json.loads(row['data_json'])['end_card'] is True
         assert conn.execute('SELECT count(*) FROM posts WHERE clip_id=?',(cid,)).fetchone()[0]==0
+
+
+def test_review_shows_hook_strength_for_display_only(studio):
+    client,headers,sid,cid=studio
+    with db.connect(config.DB_PATH) as conn:
+        data=json.loads(conn.execute('SELECT data_json FROM clips WHERE id=?',(cid,)).fetchone()[0]);data['hook_strength']=.72
+        conn.execute('UPDATE clips SET data_json=? WHERE id=?',(json.dumps(data),cid))
+    assert 'hook 0.72' in client.get('/',params={'tab':'review','source':sid}).text

@@ -11,12 +11,15 @@ blend: the model's order is the rank, and the human is the second judge (§5.4).
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 SENTENCE_END = re.compile(r"[.!?]['\"’”)]*$")
+# A cold-open line may be a phrase: it may also end at a clause mark.
+PHRASE_END = re.compile(r"([.!?,;:]|--|[—–])['\"’”)]*$")
 
 MIN_SURVIVING_CANDIDATES = 5
 # Used only when the brief states no range. Any clip postable on Reels, TikTok
@@ -24,6 +27,10 @@ MIN_SURVIVING_CANDIDATES = 5
 # (Shorts), 10 s the floor four captured briefs state (§6.1).
 DEFAULT_MIN_DURATION_S = 10.0
 DEFAULT_MAX_DURATION_S = 180.0
+# A cold-open line (tease or payoff) must play for 1.5-4.0 s after snapping.
+COLD_OPEN_MIN_S = 1.5
+COLD_OPEN_MAX_S = 4.0
+COLD_OPEN_MODES = ("tease", "payoff")
 
 # Run-level S5 duration presets, used only when the brief states no duration.
 # `shorts-dense` comes from the user's retention research, which cites a vendor
@@ -51,6 +58,13 @@ class Candidate:
     brief_flags: list[str] = field(default_factory=list)
     start: float | None = None
     end: float | None = None
+    # Display and log only (§5.7); never sorted, filtered or blended (§5.4).
+    hook_strength: float | None = None
+    # Model indices for the cold-open lines, checked in cold_open_spans.
+    tease_words: tuple[int | None, int | None] = (None, None)
+    payoff_words: tuple[int | None, int | None] = (None, None)
+    tease: dict[str, Any] | None = None
+    payoff: dict[str, Any] | None = None
 
     @property
     def duration(self) -> float:
@@ -63,7 +77,8 @@ class Candidate:
             "rank": self.rank, "start_word": self.start_word, "end_word": self.end_word,
             "hook_text": self.hook_text, "why": self.why, "topic": self.topic,
             "brief_flags": self.brief_flags, "start": self.start, "end": self.end,
-            "duration": self.duration,
+            "duration": self.duration, "hook_strength": self.hook_strength,
+            "tease": self.tease, "payoff": self.payoff,
         }
 
 
@@ -80,9 +95,16 @@ RANKING_SCHEMA = {
                     "hook_text": {"type": "string"},
                     "why": {"type": "string"},
                     "topic": {"type": "string"},
+                    "hook_strength": {"type": "number"},
                     "brief_flags": {"type": "array", "items": {"type": "string"}},
+                    "tease_start_word": {"type": "integer"},
+                    "tease_end_word": {"type": "integer"},
+                    "payoff_start_word": {"type": "integer"},
+                    "payoff_end_word": {"type": "integer"},
                 },
-                "required": ["start_word", "end_word", "hook_text", "why", "topic"],
+                "required": ["start_word", "end_word", "hook_text", "why", "topic",
+                             "hook_strength", "brief_flags", "tease_start_word",
+                             "tease_end_word", "payoff_start_word", "payoff_end_word"],
                 "additionalProperties": False,
             },
         }
@@ -92,36 +114,50 @@ RANKING_SCHEMA = {
 }
 """Sent as the S5 structured-output format (§5.3). Structured outputs require
 `additionalProperties: false` on every object and reject numeric and length
-constraints, so index ranges, durations and overlap stay with post_process."""
+constraints, so index ranges, durations, overlap and the 0-1 range of
+`hook_strength` stay with post_process."""
 
 PROMPT = """You are selecting standalone short-form clips from a long transcript.
 
-The transcript below is one line per sentence. Each line begins with the word \
-index of its first word, in square brackets. **Refer to moments only by word \
-index.** Never output a timestamp; timestamps are looked up from alignment data.
+TRANSCRIPT FORMAT
+One sentence per line. Each line begins with [n], the global word index of its
+first word (indexing starts at 0 and runs across the whole transcript).
+Refer to moments only by word index. Never output a timestamp; timestamps are
+looked up from alignment data.
 
-Return JSON only: {{"candidates": [...]}}, ordered best first. Produce exactly \
-{count} candidates.
+TASK
+Select up to {count} clips, ordered best first.
 
-Each candidate needs:
-- `start_word`, `end_word`: inclusive word indices bounding the clip.
-- `hook_text`: at most 8 words, the on-screen opener. Not a summary — the line \
-that stops a scroll.
-- `why`: one line. What makes it standalone, and what the payoff is.
-- `topic`: two or three words.
-- `brief_flags`: brief rules this clip might touch. Empty list if none.
+FIELDS
+- start_word, end_word: inclusive global word indices. Aim for
+  {min_words}-{max_words} words (~{min_duration:.0f}-{max_duration:.0f}s at
+  this speaker's pace).
+- hook_text: at most 8 words, the on-screen opener shown in the first seconds.
+  The line that stops a scroll, never a description or summary of the clip.
+- why: at most 20 words. What makes it standalone, and the payoff a viewer gets.
+- topic: 2-3 lowercase words.
+- hook_strength: 0.0-1.0, how strongly the opening earns attention.
+- brief_flags: brief rules this clip might touch, else [].
+- tease_start_word, tease_end_word: inclusive global word indices of the single
+  most gripping line in the clip that raises the question or tension WITHOUT
+  giving away the answer. One sentence or phrase of 4-12 words, inside
+  [start_word, end_word]. It may be played before the clip as a cold open.
+- payoff_start_word, payoff_end_word: inclusive global word indices of the line
+  where the tension resolves and the viewer gets the reward. One sentence or
+  phrase of 4-12 words, inside [start_word, end_word], not overlapping the tease.
 
-Requirements:
-- **Standalone comprehensibility.** A viewer with no context must follow it. \
-No clip may depend on something said earlier in the source.
-- **Hook in the first 3 seconds.** The opening sentence must earn attention.
-- **Payoff before the end.** The clip must resolve, not trail off.
-- **No overlapping candidates.**
-- **Cover the whole source.** Spread candidates across the transcript rather \
-than clustering at the start; late material is less likely to be picked by \
-other clippers working from the same source.
-- Target {min_duration:.0f}-{max_duration:.0f} seconds. Roughly \
-{min_words}-{max_words} words at this speaker's pace.
+REQUIREMENTS
+1. Standalone: a viewer with zero prior context can follow the clip. Reject
+   clips that lean on earlier context (pronouns with unresolved antecedents,
+   "as I said", callbacks).
+2. Hook early: the opening words earn attention within about 3 seconds.
+3. Payoff: the clip resolves on its own, with no trailing off mid-thought.
+4. No overlap: no two candidates share a word.
+5. Spread: distribute candidates across the whole transcript. Late material is
+   under-picked by other clippers on this source, so prefer it when quality is
+   close.
+6. Quantity: return {count} clips only if the source has {count} that meet
+   every requirement. Otherwise return fewer; never pad with weak clips.
 {brief_block}
 Transcript:
 {transcript}"""
@@ -240,6 +276,8 @@ def parse_candidates(raw: str) -> list[Candidate]:
     if not isinstance(data, dict) or not isinstance(data.get("candidates"), list):
         raise RankingError("missing a top-level 'candidates' array")
 
+    # An empty array is legal: the prompt says to return fewer rather than pad,
+    # and the >=5-survivor gate decides (§5.4).
     out: list[Candidate] = []
     for rank, item in enumerate(data["candidates"], 1):
         if not isinstance(item, dict):
@@ -255,10 +293,102 @@ def parse_candidates(raw: str) -> list[Candidate]:
             why=str(item.get("why", "")).strip(),
             topic=str(item.get("topic", "")).strip(),
             brief_flags=[str(f) for f in (item.get("brief_flags") or [])],
+            hook_strength=_unit(item.get("hook_strength")),
+            tease_words=(_index(item.get("tease_start_word")), _index(item.get("tease_end_word"))),
+            payoff_words=(_index(item.get("payoff_start_word")), _index(item.get("payoff_end_word"))),
         ))
-    if not out:
-        raise RankingError("the candidates array is empty")
     return out
+
+
+def _unit(value: Any) -> float | None:
+    """A 0-1 self-rating, or None when it is missing or out of range."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if math.isfinite(value) and 0.0 <= value <= 1.0 else None
+
+
+def _index(value: Any) -> int | None:
+    """A cold-open word index. A bad one disables only that mode, never the clip."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def phrase_starts(words: Sequence[Any]) -> list[int]:
+    """Indices where a sentence or phrase begins."""
+    starts = [0]
+    for i, w in enumerate(words[:-1]):
+        if PHRASE_END.search(w.word if hasattr(w, "word") else w["word"]):
+            starts.append(i + 1)
+    return starts
+
+
+def phrase_ends(words: Sequence[Any]) -> list[int]:
+    """Indices where a sentence or phrase ends."""
+    ends = [i for i, w in enumerate(words)
+            if PHRASE_END.search(w.word if hasattr(w, "word") else w["word"])]
+    if not ends or ends[-1] != len(words) - 1:
+        ends.append(len(words) - 1)
+    return ends
+
+
+def span_problem(span: dict, start_word: int, end_word: int) -> str | None:
+    """Why a checked cold-open span cannot play in a clip spanning these words.
+
+    Also run at Review and render time, because a trim can move the clip
+    boundary past a line that was valid when S5 checked it.
+    """
+    if not span:
+        return "no line"
+    if span.get("problem"):
+        return span["problem"]
+    if not start_word <= span["start_word"] <= span["end_word"] <= end_word:
+        return "outside the clip"
+    return None
+
+
+def cold_open_spans(candidate: Candidate, words: Sequence[Any],
+                    starts: list[int], ends: list[int]) -> Candidate:
+    """Check, snap and time the tease and payoff lines of a snapped, timed clip.
+
+    An invalid line only disables that cold-open mode for this clip; it never
+    drops the candidate or gates the run. When the two overlap, the payoff is
+    disabled: tease is the mode the user prefers [I].
+    """
+    def check(pair: tuple[int | None, int | None]) -> dict[str, Any]:
+        lo, hi = pair
+        span: dict[str, Any] = {"model_start_word": lo, "model_end_word": hi, "problem": None}
+        if lo is None or hi is None or lo > hi:
+            span["problem"] = "missing or reversed word indices"
+            return span
+        if not candidate.start_word <= lo <= hi <= candidate.end_word:
+            span["problem"] = "outside the clip"
+            return span
+        # Outward, like clip spans. Clip ends are sentence ends, which are also
+        # phrase ends, so the snapped line stays inside the clip.
+        a = max(s for s in starts if s <= lo)
+        b = min(e for e in ends if e >= hi)
+        timed = resolve_times(Candidate(0, a, b), words)
+        span.update(start_word=a, end_word=b, start=timed.start, end=timed.end,
+                    duration=timed.duration,
+                    text=" ".join(_word(words[i]) for i in range(a, b + 1)))
+        if timed.start is None or timed.end is None:
+            span["problem"] = "no aligned timing"
+        elif not COLD_OPEN_MIN_S <= timed.duration <= COLD_OPEN_MAX_S:
+            span["problem"] = (f"{timed.duration:.2f}s is outside "
+                               f"{COLD_OPEN_MIN_S:g}-{COLD_OPEN_MAX_S:g}s")
+        return span
+
+    tease, payoff = check(candidate.tease_words), check(candidate.payoff_words)
+    if ("start_word" in tease and "start_word" in payoff
+            and tease["start_word"] <= payoff["end_word"]
+            and payoff["start_word"] <= tease["end_word"]):
+        payoff["problem"] = payoff["problem"] or "overlaps the tease"
+    candidate.tease, candidate.payoff = tease, payoff
+    return candidate
+
+
+def _word(w: Any) -> str:
+    return w.word if hasattr(w, "word") else w["word"]
 
 
 def post_process(
@@ -269,6 +399,7 @@ def post_process(
 ) -> tuple[list[Candidate], dict[str, int]]:
     """§5.4 steps 2-4. Returns survivors and a count of what each filter dropped."""
     starts, ends = sentence_starts(words), sentence_ends(words)
+    pstarts, pends = phrase_starts(words), phrase_ends(words)
     total = len(words)
     dropped = {"out_of_range": 0, "no_timing": 0, "duration": 0, "overlap": 0}
 
@@ -285,7 +416,7 @@ def post_process(
         if not (min_duration_s <= c.duration <= max_duration_s):
             dropped["duration"] += 1
             continue
-        staged.append(c)
+        staged.append(cold_open_spans(c, words, pstarts, pends))
 
     before = len(staged)
     kept = remove_overlaps(staged)
@@ -313,7 +444,7 @@ def rank(
 
     last_error = ""
     for attempt in (1, 2):
-        raw = llm_fn(prompt if attempt == 1 else prompt + _RETRY_SUFFIX)
+        raw = llm_fn(prompt if attempt == 1 else prompt + _RETRY_SUFFIX.format(error=last_error))
         try:
             parsed = parse_candidates(raw)
         except RankingError as exc:
@@ -330,8 +461,5 @@ def rank(
     raise RankingError(f"schema-invalid output after one retry: {last_error}")
 
 
-_RETRY_SUFFIX = (
-    "\n\nIMPORTANT: your previous reply was not valid. Return ONLY a JSON object "
-    'with a top-level "candidates" array. Every candidate needs integer '
-    "start_word and end_word. No markdown fences, no commentary."
-)
+_RETRY_SUFFIX = ("\n\nYour previous reply could not be used ({error}). "
+                 "Reply with just the JSON object described above.")
