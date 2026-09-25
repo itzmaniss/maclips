@@ -232,6 +232,7 @@ def test_version_bump_forces_recompute(tmp_path):
     # The stages whose output this session changed were bumped.
     assert STAGES_BY_ID["S7"].version >= 4 and STAGES_BY_ID["S8"].version >= 4
     assert STAGES_BY_ID["S12"].version >= 3 and "S4" in STAGES_BY_ID["S7"].needs
+    assert STAGES_BY_ID["S8"].version >= 6 and STAGES_BY_ID["S12"].version >= 5  # padded clip edges
 
 
 def test_end_card_is_timed_against_the_edited_end(tmp_path, monkeypatch):
@@ -255,3 +256,24 @@ def test_end_card_is_timed_against_the_edited_end(tmp_path, monkeypatch):
 def test_pacing_constants_are_config():
     assert (config.DEAD_AIR_GAP_S, config.DEAD_AIR_PAD_S, config.ZOOM_FACTOR,
             config.ZOOM_MIN_HOLD_S, config.ZOOM_PAUSE_S) == (0.8, 0.12, 1.15, 3.0, 1.5)
+
+
+def test_clip_edges_pad_into_silence_up_to_half_the_gap():
+    # Clip b..c: 0.5 s before b (pad 0.12), 0.1 s after c (half the gap, 0.05).
+    words = [w("a", 0.0, 0.5), w("b", 1.0, 1.5), w("c", 1.6, 2.0), w("d", 2.1, 2.5)]
+    assert pacing.padded_span(words, 1.0, 2.0) == pytest.approx((0.88, 2.05))
+    assert pacing.padded_span(words, 0.0, 2.5) == (0.0, 2.5)          # no neighbours: edges stay
+    assert pacing.padded_span([w("a", 0, 1.2), w("b", 1.5, 2)], 1.0, 2.0) == (1.0, 2.0)  # word across the edge
+
+
+def test_render_pads_clip_edges_and_stretches_saved_segments(tmp_path, monkeypatch):
+    source, commands, _ = fake_ffmpeg(monkeypatch, tmp_path, lambda cmd: 6.24)
+    words = [w("x", 9.0, 9.5)] + WORDS + [w("y", 17.0, 17.5)]
+    result = render.render_clip(source, source, {"start": 10.0, "end": 16.0, "dead_air": False, "zoom": False},
+                                words, PLAN, tmp_path / "pad.mp4")
+    assert result["source_span_s"] == pytest.approx(6.24)
+    cmd = commands[0]
+    graph = cmd[cmd.index("-filter_complex") + 1]
+    assert cmd[cmd.index("-ss") + 1] == "9.880000"
+    assert "[1:a]atrim=duration=6.240000" in graph
+    assert "trim=start=0.000000:end=2.620000" in graph and "trim=start=2.620000:end=6.240000" in graph

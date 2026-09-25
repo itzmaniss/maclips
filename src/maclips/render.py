@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import config, ffmpeg
 from .layouts import split_divider
-from .pacing import cold_open_keep, combined_words, edited_time, half_frame, plan_pacing, video_pieces
+from .pacing import cold_open_keep, combined_words, edited_time, half_frame, padded_span, plan_pacing, video_pieces
 from .ranking import cold_open_choice
 
 
@@ -332,6 +332,9 @@ def render_clip(video: Path, audio: Path, candidate: dict, words: list[dict],
     if outpath in (video, audio):
         raise RenderError("output may not replace an original input")
     segments = clipped_segments(plan["segments"], start, end) if "segments" in plan else None
+    start, end = padded_span(words, start, end)
+    if segments:
+        segments[0]["start"], segments[-1]["end"] = start, end
     begun = time.perf_counter()
     try:
         source = ffmpeg.probe(video)

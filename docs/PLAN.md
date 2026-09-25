@@ -178,6 +178,7 @@ Each stage checkpoints its output and is cached by content hash (source hash + s
    The cost is that ranking sees neither visual cues nor speaker labels. For podcast material the transcript carries most of the signal, so this is accepted — but it is now a larger bet than when only vision was deferred, and step 4 should test it. [V for the timings, I for the judgement]
 
 3. **The LLM returns word indices, not timestamps.** Boundaries are then snapped to sentence starts and ends using punctuation in the transcript. This makes mid-word cuts impossible and removes the risk of hallucinated timestamps. Timestamps are looked up from the alignment data, never generated. [I]
+   **Corrected 2026-09-25 [V], §6.7:** it rules out a cut between two words' indices, not a cut inside a sound. Aligned word edges run early at the end and late at the start, and one numeric token ("0.1%.") was aligned to 0.26 s of a ~1 s utterance, so a clip cut on them can still clip speech.
 
 4. **Attribution is per shot (S6→S7).** A shot boundary resets face tracks. The speaker-to-face mapping is re-established per shot. This handles multicam cuts without special-casing them. [I]
 
@@ -2325,6 +2326,138 @@ video 3 candidate 2 (face-centred) came from the merged code.
   the worst-case 60-character card. The zoom lifts face tops by about
   40–60 px, and the lowest is row 259. Hair above the box can still reach the
   band, as with the hook.
+
+### 6.7 Mid-speech cut audit, session 2026-09-25 (midspeech)
+
+The user reported that some clips "cut out mid speech". This audit covers the
+current S5 output of video 2 (11 clips) and video 3 (11 clips) and their S8
+previews in `previews-rank-v2/`. There was no API spend. Scripts and JSON are
+in `work/session-20260925-midspeech/`: `audit.py`, `tail.py`,
+`tail_energy.py`, `head_and_base.py`, `render_check.py` and `rerender.py`.
+
+**Boundary audit [V].** A clip is flagged when the next word starts within
+0.3 s of its end with the same S4 speaker, when its last word has no terminal
+punctuation, or when snapping moved its end inward.
+- Video 2: 6 of 11 flagged (ranks 4, 5, 6, 7, 9 and 12). Video 3: 4 of 11
+  flagged (ranks 1, 2, 4 and 10).
+- No clip lacks terminal punctuation, and none had its end moved inward.
+  Snapping is outward only, so both are structurally impossible; every flag
+  came from the 0.3 s rule.
+- The rule misses three clips whose ending is plainly mid-sentence:
+  - video 2 rank 2 ends "Not that I'm..." (next word "of course", 0.50 s);
+  - video 2 rank 11 ends "fight someone way..." (next word "bigger", 0.34 s);
+  - video 2 rank 8 ends on the fragment "I think." (next words "Anyone in the
+    beginning", 0.48 s).
+
+**Cause 1: the model's end index is the next sentence's first word, and
+outward snapping then appends that whole sentence [V].**
+- 17 of 22 model `end_word`s are exactly the first word of a transcript line.
+  The base rate is 8.6% of words in video 2 and 7.6% in video 3.
+- Starts are not affected: 18 of 22 model `start_word`s are line starts,
+  because the line prefix gives that index.
+- [I] The model treats the next line's `[n]` as an exclusive end: it sees an
+  index only for each line's first word (§5.3 found the same miscounting for
+  the tease and payoff lines).
+- Snapping moves the end outward to the end of that next sentence. That
+  sentence often opens a new thought, which then continues past the cut:
+  - video 2 rank 5 ends on the host's new question "Did you get rid of the
+    clothes or you just don't buy as many anymore?". The answer "I sold a
+    lot" starts 0.10 s later.
+  - video 2 rank 9 does the same with "Do you think he made the money back…?"
+    The answer "Yeah. Probably" starts 0.10 s later.
+  - video 2 ranks 6 and 12 and video 3 ranks 1 and 4 end one sentence into a
+    new thought ("And it's a skillset…", "Vice versa, …", "Currently, …", "But
+    I want to…"). The speaker carries on within 0.02–0.12 s.
+- This is the dominant cause: 8 of the 10 flagged clips, plus the 3 extra
+  clips listed above (11 clips across both videos). Two of the 8 still end
+  acceptably: video 2 rank 7 ("That took off and here I am.") and video 3
+  rank 2 (the host's "Okay.").
+- [V] The sentence the model most likely meant ends on the word before its
+  `end_word`. After that word, the gap to the next word is 0.28–1.63 s in
+  video 3 (9 clips) but only 0.02–0.18 s in video 2 (7 clips).
+
+**Cause 2: the model's end is mid-sentence (cause a) [V].** Video 2 rank 4
+("like" → "…best version of yourself.", next "You know, go to the gym", 0.02 s)
+and video 3 rank 10 ("this" → 33 words later, next "They're going to love
+it.", 0.02 s).
+
+**Cause 3: snapping trusts Whisper's punctuation (cause b) [V].**
+- `SENTENCE_END` treats "..." as a sentence end. Whisper uses it for
+  hesitation, and it appears on 2 of 668 sentence ends in video 2 and 13 of
+  909 in video 3.
+- It ends video 2 ranks 2 and 11 mid-sentence.
+- "I think." as its own sentence (video 2 rank 8) is the same failure.
+
+**Cause 4: word timing at the edge (cause c) [V].**
+- No boundary word is weak. The lowest last-word score is 0.348, above the
+  0.10 gate, so S3's 12% weak-word gate cannot catch this.
+- Video 3 rank 11 ends on "0.1%.", aligned to 0.26 s (4004.966–4005.226). S4
+  has the same speaker talking until 4005.97, and the source stays at about
+  −17 dBFS for 0.5 s past the aligned end, with no transcribed word until
+  2.08 s later.
+- The clip cuts "zero point one percent" inside the word. Padding cannot fix
+  this.
+
+**Cause 5: no pad at the clip's outer edges (render, cause d) [V, fixed].**
+- Every preview started and ended exactly on the first word's aligned start
+  and the last word's aligned end. The last keep's end minus the last word's
+  end was within ±0.018 s, which is the half-frame snap.
+- All 22 previews ended loud: the final 100 ms measured −13.5 to −40 dBFS
+  after loudnorm.
+- The source shows speech continuing past the aligned end:
+  - about 100 ms at −28 to −36 dBFS in video 3 ranks 8 and 9;
+  - about 150 ms in video 2 rank 11.
+
+  It also shows onsets starting before the aligned start: video 3 ranks 1,
+  4, 7 and 10 measured −17 to −24 dBFS in the 50 ms before, after 1.0–2.0 s
+  gaps.
+- Internal dead-air cuts already kept 0.12 s of pad; the outer edges kept
+  none.
+- **Fix:** `pacing.padded_span` widens each edge by up to `DEAD_AIR_PAD_S`
+  (0.12 s). It never goes past half the gap to the neighbouring word, and it
+  leaves an edge alone when there is no neighbour or a word crosses it.
+  `render_clip` applies it before pacing and stretches the saved S7
+  segments. S8 is now v6 and S12 v5.
+- Re-rendered all 22 first-layout previews into `previews-midspeech-fix/`
+  (the old ones are kept):
+  - all passed the 0.1 s drift gate, with audio present;
+  - the edited length grew by 0.05–0.24 s;
+  - tail pads were 0.010–0.127 s, and 14 of 22 clips now end with the final
+    40 ms at or below −44 dBFS;
+  - clips whose next word follows within about 0.05 s (video 2 ranks 1, 4, 6
+    and 12, video 3 ranks 1 and 10) still end on sound, because causes 1 and
+    2 leave no silence to pad into;
+  - video 3 rank 11 still ends at −12 dBFS (cause 4).
+- [I] The Review playhead-to-source mapping (`app.js`, `dataset.start +
+  currentTime`) now runs up to 0.12 s early. It already ignored dead-air
+  cuts.
+
+**Checked and cleared [V].**
+- No dead-air cut in any of the 22 previews removes part of an aligned word.
+- The audio stream is never shorter than the planned timeline: it runs
+  +0.00 to +0.10 s longer, in whole AAC frames.
+- End card: off in these previews, and it only draws text, so it cannot
+  shorten audio.
+- Cold open: none of the audited previews has one. The one cold-open preview
+  (video 2 rank 12, payoff) ends its line on "Vice versa," with "if" following
+  0.10 s later. This is mid-sentence by design: §5.4 item 6 allows clause
+  marks.
+
+**Proposed, not built (user decides).**
+1. When the model's `end_word` is the first word of a sentence after its
+   `start_word`, end the clip on the previous sentence end. This targets
+   cause 1 (17/22 hits against a ~8% base rate). An alternative with the same
+   aim is to show each line's last index in `build_transcript`, which changes
+   the model's input.
+2. Do not treat "..." as a sentence end for clip snapping (cause 3).
+3. Pause-aware ends: when a same-speaker word follows within 0.3 s, extend to
+   the next sentence end followed by a pause or a speaker change, within the
+   duration range. This targets fast speakers (video 2), where even correct
+   sentence ends run on.
+4. When S4's turn for the last speaker runs past the last aligned word and no
+   word follows, extend the end to the turn end, or flag the clip in Review
+   (cause 4).
+5. Pad or fade the end of the cold-open line before the flash cut.
 
 ## 7. Campaign workflow
 

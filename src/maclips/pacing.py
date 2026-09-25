@@ -50,6 +50,34 @@ def dead_air_keeps(words: list[dict], start: float, end: float) -> list[tuple[fl
     return [(a, b) for a, b in keeps if b > a]
 
 
+def padded_span(words: list[dict], start: float, end: float) -> tuple[float, float]:
+    """Clip edges widened into the neighbouring silence, like each cut's pad.
+
+    Aligned word edges run early at the end and late at the start, so a clip
+    cut exactly on them clips its first and last sounds (PLAN.md §6.7). Each
+    edge moves out by up to DEAD_AIR_PAD_S, never past half the gap to the
+    neighbouring word; an edge with no neighbour, or a word across it, stays.
+    """
+    pad = config.DEAD_AIR_PAD_S
+    before, after, crosses = [], [], set()
+    for word in words:
+        if word.get("start") is None or word.get("end") is None:
+            continue
+        a, b = float(word["start"]), float(word["end"])
+        if not (math.isfinite(a) and math.isfinite(b)):
+            continue
+        if b <= start + 1e-9:
+            before.append(b)
+        elif a >= end - 1e-9:
+            after.append(a)
+        for name, edge in (("head", start), ("tail", end)):
+            if a < edge - 1e-9 and b > edge + 1e-9:
+                crosses.add(name)
+    head = min(pad, (start - max(before)) / 2) if before and "head" not in crosses else 0.0
+    tail = min(pad, (min(after) - end) / 2) if after and "tail" not in crosses else 0.0
+    return start - max(0.0, head), end + max(0.0, tail)
+
+
 def half_frame(t: float, fps: float, origin: float) -> float:
     return origin + (math.floor((t - origin) * fps) + .5) / fps
 

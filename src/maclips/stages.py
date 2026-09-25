@@ -566,7 +566,8 @@ STAGES: tuple[StageSpec, ...] = (
     StageSpec("S8", "proxy-render", "540x960 videotoolbox previews", s8_proxy_render,
               # v4: dead-air removal and punch-in zoom in the render (2026-09-25c).
               # v5: optional cold open on the combined timeline (2026-09-25).
-              needs=("S7",), version=5, gate="Posted clips cannot be regenerated"),
+              # v6: clip edges padded into the neighbouring silence (§6.7).
+              needs=("S7",), version=6, gate="Posted clips cannot be regenerated"),
     StageSpec("S9", "review", "Human selection and trimming", s9_review,
               needs=("S8",), params=("approvals",), gate="Human gate by definition"),
     StageSpec("S10", "commentary", "Resolve commentary text", s10_commentary,
@@ -575,7 +576,7 @@ STAGES: tuple[StageSpec, ...] = (
               needs=("S10",), version=2,
               gate="Any mechanical failure blocks the clip"),
     StageSpec("S12", "final-render", "One-pass 1080x1920 libx264 encode", s12_final_render,
-              needs=("S11",), version=4,  # v4: combined cold-open duration; v3: post-cut, 2026-09-25c
+              needs=("S11",), version=5,  # v5: padded clip edges (§6.7); v4: combined cold-open duration; v3: post-cut, 2026-09-25c
               gate="Edited duration outside the brief's range; duration drift > 0.1s "
                    "against the edited plan; wrong resolution; no audio stream"),
     StageSpec("S13", "export-bundle", "MP4 + caption.txt + checklist.md", s13_export_bundle,
