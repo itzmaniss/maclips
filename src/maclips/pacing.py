@@ -147,3 +147,30 @@ def video_pieces(keeps, segments, switches, snap) -> list[list]:
     return pieces
 
 
+
+
+def cold_open_keep(start: float, end: float, fps: float, origin: float) -> list[tuple[float, float]]:
+    """The cold-open line as one source interval on the half-frame grid, played
+    whole before the clip: no dead-air cut inside a 1.5-4 s line [I]."""
+    a, b = half_frame(start, fps, origin), half_frame(end, fps, origin)
+    return [(a, b)] if b > a else []
+
+
+def combined_words(words: list[dict], lead: list[tuple[float, float]],
+                   keeps: list[tuple[float, float]]) -> list[dict]:
+    """Words on the combined timeline: the cold-open line from 0, then the whole
+    clip from the line's length, so the line is captioned twice, in place both
+    times, and the captions run without a gap across the join."""
+    lead_s = sum(b - a for a, b in lead)
+    timed = []
+    for w in words:
+        if w.get("start") is None or w.get("end") is None:
+            continue
+        a, b = float(w["start"]), float(w["end"])
+        offset = 0.0
+        for x, y in lead:
+            if b > x and a < y:
+                timed.append({**w, "start": offset + max(a, x) - x, "end": offset + min(b, y) - x})
+            offset += y - x
+        timed.append({**w, "start": lead_s + edited_time(a, keeps), "end": lead_s + edited_time(b, keeps)})
+    return timed

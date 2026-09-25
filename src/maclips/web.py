@@ -15,6 +15,7 @@ from fastapi.templating import Jinja2Templates
 from . import config, db
 from .compliance import ComplianceError, validate_clip, human_checklist
 from .brief import BriefInvalid, BriefRejected
+from .ranking import COLD_OPEN_MODES, cold_open_modes
 
 app=FastAPI(title='maclips')
 ROOT=Path(__file__).parent
@@ -116,7 +117,7 @@ def index(request:Request,tab:str='ingest',source:int|None=None,clip:int|None=No
             item['campaign_name']=src['state'].get('brief',{}).get('campaign_name') or 'Own content'
             item['deadline_at']=row['posted_at']+window*60 if row['posted_at'] and window else None
             posts.append(item)
-    return templates.TemplateResponse(request=request,name='app.html',context={'tab':tab,'sources':sources,'campaigns':campaigns,'source':selected,'clips':clips,'clip':chosen,'words':words,'brief':brief,'checklist':human_checklist(brief),'mechanical':mechanical,'end_card_default':config.END_CARD_TEXT,'end_card_max':config.END_CARD_MAX_CHARS,'end_card_seconds':config.END_CARD_SECONDS,'timing':timing,'posts':posts,'preview_count':sum(len(c['data'].get('previews',{})) for c in clips),'csrf':CSRF,'jobs':JOBS})
+    return templates.TemplateResponse(request=request,name='app.html',context={'tab':tab,'sources':sources,'campaigns':campaigns,'source':selected,'clips':clips,'clip':chosen,'words':words,'brief':brief,'checklist':human_checklist(brief,chosen['data'] if chosen else None),'cold_modes':cold_open_modes(chosen['data']) if chosen else [],'mechanical':mechanical,'end_card_default':config.END_CARD_TEXT,'end_card_max':config.END_CARD_MAX_CHARS,'end_card_seconds':config.END_CARD_SECONDS,'timing':timing,'posts':posts,'preview_count':sum(len(c['data'].get('previews',{})) for c in clips),'csrf':CSRF,'jobs':JOBS})
 
 
 @app.get('/media/{cid}/{layout}')
@@ -222,6 +223,14 @@ def edit_clip(cid,payload):
     if not 0<len(card_text)<=config.END_CARD_MAX_CHARS: raise ValueError(f'end card text must be 1–{config.END_CARD_MAX_CHARS} characters')
     data.update(start_word=start,end_word=end,start=a,end=b,duration=b-a,hook_text=str(payload.get('hook_text',data.get('hook_text',''))),
                 end_card=card,end_card_text=card_text)
+    # A trim that pushes the line out of the clip turns the cold open off (the
+    # per-clip fallback); choosing an unavailable mode outright is refused.
+    mode=payload.get('cold_open',data.get('cold_open') or 'off')
+    if mode not in ('off',*COLD_OPEN_MODES): raise ValueError('cold open must be off, tease or payoff')
+    if mode!='off' and mode not in cold_open_modes(data):
+        if mode!=(data.get('cold_open') or 'off'): raise ValueError(f'no valid {mode} line inside this clip')
+        mode='off'
+    data['cold_open']=mode
     for toggle in ('dead_air','zoom'):
         if toggle in payload:
             if not isinstance(payload[toggle],bool): raise ValueError(f'{toggle} must be true or false')

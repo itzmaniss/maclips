@@ -64,9 +64,11 @@ if (editor) {
   const layout = $('#layout');
   let startWord = Number(editor.dataset.startWord), endWord = Number(editor.dataset.endWord);
   const selectedLayout = () => layout.value;
+  // Turning the cold open on picks the selector's mode, tease first when offered.
+  const coldOpen = () => $('#cold-open')?.checked ? $('#cold-open-mode').value : 'off';
   const edit = async extra => {
     if (startWord > endWord) throw new Error('In must come before out.');
-    await waitJob(await request(`/clips/${clipId}/edit`, {revision:Number(editor.dataset.revision),start_word:startWord, end_word:endWord, hook_text:$('#hook-text').value, layout:selectedLayout(), dead_air:$('#dead-air').checked, end_card:$('#end-card').checked, end_card_text:$('#end-card-text').value, zoom:$('#zoom').checked, ...extra}));
+    await waitJob(await request(`/clips/${clipId}/edit`, {revision:Number(editor.dataset.revision),start_word:startWord, end_word:endWord, hook_text:$('#hook-text').value, layout:selectedLayout(), dead_air:$('#dead-air').checked, end_card:$('#end-card').checked, end_card_text:$('#end-card-text').value, zoom:$('#zoom').checked, cold_open:coldOpen(), ...extra}));
   };
   // Toggling re-renders only this clip's selected preview, like a trim.
   for (const id of ['#dead-air', '#zoom']) $(id).addEventListener('change', async () => { try { await edit({}); } catch (error) { notice(error.message, true); } });
@@ -92,6 +94,12 @@ if (editor) {
     finally { endCard.disabled = false; }
   });
   action($('#save-end-card'), () => edit({}));
+  for (const id of ['#cold-open', '#cold-open-mode']) $(id)?.addEventListener('change', async event => {
+    if (id === '#cold-open-mode' && !$('#cold-open').checked) return;
+    event.target.disabled = true;
+    try { await edit({}); } catch (error) { if (id === '#cold-open') event.target.checked = !event.target.checked; notice(error.message, true); }
+    finally { event.target.disabled = false; }
+  });
   async function decision(value, reason='') {
     const result = await request(`/clips/${clipId}/decision`, {revision:Number(editor.dataset.revision),decision:value, reason, platform:$('#platform').value, account:$('#account').value, account_class:$('#account-class').value, caption:$('#caption').value, layout:selectedLayout(), hook_text:$('#hook-text').value});
     await waitJob(result);

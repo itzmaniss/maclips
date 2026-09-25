@@ -1628,13 +1628,61 @@ The prompt instructs:
 - **Coverage across the whole source,** not clustered at the start.
 - **Brief constraints as hard exclusions:** length range and forbidden topics.
 
+**Approved prompt, 2026-09-25 [V].** The user approved new `PROMPT` text,
+which is used verbatim (`ranking.PROMPT`, S5 v2). It asks for "up to {count}"
+clips and says to return fewer rather than pad. It adds three things per
+candidate:
+- `hook_strength`: a 0–1 self-rating (§5.7);
+- `tease_start_word`/`tease_end_word`: the line that raises the question
+  without answering it;
+- `payoff_start_word`/`payoff_end_word`: the line where the tension resolves.
+
+Each line should be 4–12 words and may be played first as a cold open (§6.2).
+`RANKING_SCHEMA` requires all 11 fields, keeps `additionalProperties: false`
+and uses no min/max keywords. The retry suffix now quotes the actual parse
+error ("Your previous reply could not be used (…). Reply with just the JSON
+object described above.").
+
+*Real check [V], `--from S5 --clip-class general-own`, default preset, one call
+each, $0.1176 in total* (`work/session-20260925-coldopen/`):
+- **Video 2:** 12 returned, 11 kept (1 dropped for overlap), gate passed.
+  17,388 input and 1,711 output tokens, $0.0519. `hook_strength` values: 0.9,
+  0.85, 0.8, 0.75, 0.8, 0.75, 0.7, 0.7, 0.7, 0.65 and 0.6.
+- **Video 3:** 11 returned (fewer than 12, which is legal), 11 kept, gate
+  passed. 24,827 input and 1,607 output tokens, $0.0657. `hook_strength`
+  values: 0.8, 0.9, 0.85, 0.8, 0.85, 0.85, 0.8, 0.8, 0.75, 0.8 and 0.75.
+- **The cold-open lines mostly fail the §5.4 checks.** Only 2 of 44 are valid:
+  video 2 candidate 12's payoff (2.54 s) and video 3 candidate 5's tease
+  (3.42 s). The model largely ignores "4-12 words". Its spans are 1–59 words
+  long, and most run 5–16 s before snapping.
+  - Video 2, before snapping: teases 0.14–6.67 s, payoffs 0.14–15.90 s.
+    Five spans fell in 1.5–4.0 s. Outward phrase snapping pushed three of
+    them past 4 s, and a fourth (rank 5's payoff) to exactly 4.02 s.
+  - Video 3, before snapping: teases 3.42–14.13 s, payoffs 4.32–9.87 s.
+    Only one span was in range.
+  - Snapping stretched one tease from 5.02 s to 35.59 s, across a long
+    unpunctuated stretch (video 3, rank 9).
+  - Miscounted indices: 5 spans lie outside the model's own clip (video 2
+    ranks 3 and 9, video 3 rank 9), and two are single words (video 2, rank 3
+    payoff and rank 9 tease). [I] The model counts word offsets inside a
+    line whose index it is only given for the first word.
+  - Nothing was changed. The user decides the fix (per-span
+    distributions: `v2-summary.json`, `v3-summary.json`).
+
 ### 5.4 Deterministic post-processing (S5 gates)
 
 1. Validate the schema client-side, although the API already constrains the reply to it (§5.3): a refusal, a truncated reply or a schema the API cannot fully express still reaches this check. Retry once, then stop.
 2. Snap spans to sentence boundaries.
 3. Drop spans outside the brief's duration range after snapping.
 4. Remove overlaps (keep the higher-ranked candidate).
-5. Stop the run if fewer than 5 candidates survive. That means a bad source or a broken prompt, and both need you.
+5. Stop the run if fewer than 5 candidates survive. That means a bad source or a broken prompt, and both need you. An empty or short reply is legal (the prompt says "return fewer"); only this gate judges it.
+6. **Cold-open lines (2026-09-25) [V, tested]:**
+   - A tease or payoff must lie inside the snapped clip.
+   - It is snapped outward to a sentence or phrase boundary: a word ending in `.!?,;:` or a dash.
+   - It must play 1.5–4.0 s.
+   - A payoff that overlaps the tease is disabled; the tease wins because the user prefers it [I].
+   - A failing line only disables that mode for that clip. It never drops the candidate or gates the run.
+   - Review and render re-check containment (`span_problem`), because a trim can move the clip edge past a line.
 
 These are filters, not score components. There is no weighted blend of features. The LLM's rank is the rank, and you are the second judge.
 
@@ -1663,7 +1711,7 @@ Rejections carry two different signals, and mixing them teaches the ranker conse
 - **Taste signal:** your approvals. Up to 8 recent approved clips for the brand go into the ranking prompt as positive few-shot examples. Once performance data exists (views logged in Posted), they are weighted by views.
 - **Your "weak hook" / "boring" rejections:** at most 2 go in as negative examples. That cap keeps the prompt from being mostly "don't".
 
-**Drift check.** Log the ranker's hook-strength self-rating and your approval rate per rank band (1–4, 5–8, 9–12). If the top band's approval rate falls while lower bands rise over a month, the ranker is getting conservative. Reset the few-shot set to the best-performing clips. [I]
+**Drift check.** `hook_strength` has been stored per candidate since 2026-09-25 [V]. It is in the S5 checkpoint and in each clip's `data_json`, where approvals and rejections join it through `time_log`. A value outside 0–1 is stored as null. Review shows it, but nothing sorts, filters or blends by it. Log the ranker's hook-strength self-rating and your approval rate per rank band (1–4, 5–8, 9–12). If the top band's approval rate falls while lower bands rise over a month, the ranker is getting conservative. Reset the few-shot set to the best-performing clips. [I]
 
 ---
 
@@ -1723,6 +1771,12 @@ A local web app served from the Mac: a Python backend in the same process as the
   editable text (default `config.END_CARD_TEXT`, never model-generated).
   Toggling or saving the text re-renders only that preview and revokes any
   approval, like a trim (§6.6) [V].
+- **Cold open (idea 3), 2026-09-25 [V]:**
+  - A per-clip checkbox plus a line selector, **off by default**.
+  - Only modes whose line passed §5.4 item 6 are offered. Turning the checkbox on picks tease first when it is available.
+  - Changing the mode re-renders only that preview and revokes approval, like a trim.
+  - Choosing an unavailable mode is refused. A trim that pushes the chosen line out of the clip switches the cold open off (the per-clip fallback).
+  - With a cold open on, the brief panel adds "Cold open reorders the clip — check forbidden edits". `checklist.md` names the mode and the line. `forbidden_edits` is free text, so nothing blocks automatically [I].
 - **Right: brief panel.** The brief's rules as a checklist, with mechanical items pre-evaluated.
 - **Actions:**
   - **Approve** opens the commentary control: Write / Auto-generate / None.
@@ -2139,6 +2193,67 @@ user's judgement. Silences can hold laughter or reactions, which the transcript
 does not show, and those are cut too [I]. The benchmark path has no S4 turns,
 so its zooms come from joins only.
 
+**Cold open (idea 3), 2026-09-25 [V].** With `cold_open` set to tease or
+payoff, `render_clip` builds one combined timeline in the same single pass:
+1. The line plays whole, on the half-frame grid, with no dead-air cut inside it.
+2. A hard cut follows, and the clip's first frame is drawn white (a 1-frame
+   flash). This separator was chosen as the simplest option [I].
+3. The whole clip then plays from its first word, with its own dead-air cuts,
+   so the line plays again in place.
+
+Everything follows the combined timeline:
+- Captions run continuously, and a new caption phrase starts at the join [I].
+- Layout margins follow the pieces actually shown.
+- The hook covers the first 3 s of the render, which includes the line.
+- The end card covers the final 3 s.
+- Zoom switches are shifted by the line's length, and the line itself is never zoomed.
+- The audio crossfades 25 ms at the join, like a dead-air cut.
+
+S12's planned duration and its brief-range gate use the combined duration.
+Versions: S8 4→5, S12 3→4 (S5 1→2 for the prompt).
+
+*Real renders [V]* (`work/session-20260925-coldopen/`; the evidence is in
+`coldopen-{previews,finals}.json`, `joins.json` and `joins/`). Two line
+sources were used:
+- **Model lines.** Only two exist (§5.3): video 2 candidate 12's payoff and
+  video 3 candidate 5's tease. They are in `previews-coldopen/` and
+  `finals-coldopen/`.
+- **Lines picked by a script, not the model.** Every other rendered line is
+  labelled **DIAGNOSTIC, NOT MODEL OUTPUT**. Each is the first phrase inside
+  the model's region that plays 1.5–4.0 s, and it only exercises the render.
+  These are in `previews-coldopen-DIAGNOSTIC-NOT-MODEL-OUTPUT/` and
+  `finals-coldopen-DIAGNOSTIC-NOT-MODEL-OUTPUT/`, with that tag in every
+  filename. They were never written to the DB or a blind sheet.
+
+Results:
+- **Previews:** eight 540×960 previews, both modes for 2 candidates per
+  source, face-centred and split, with dead-air removal and zoom on. All have
+  audio. ffprobe minus plan: +0.085, +0.010, +0.079, +0.023, +0.040, +0.060,
+  +0.020 and −0.000 s.
+- **Finals:** two 1080×1920 finals through `render_clip`'s S12 path
+  (libx264, `diagnostic=True`, brief-range gate on). They did not go through
+  the S12 stage, which needs a human approval.
+  - Video 2 candidate 12, payoff, model line: planned 42.895 s, ffprobe
+    42.918 s.
+  - Video 3 candidate 3, tease, DIAGNOSTIC, NOT MODEL OUTPUT: 9 cuts and 5
+    zoomed pieces; planned 81.460 s, ffprobe 81.500 s.
+  - Both have audio.
+- **Joins:** all 10 renders were decoded across ±0.3 s of the join.
+  - Exactly one white frame (97–99% of pixels) sits at the join, with
+    ordinary frames either side.
+  - Caption pixels are present on both sides.
+  - The largest sample-to-sample audio step within ±40 ms of the join is
+    0.022–0.074. The largest step in the surrounding 2 s of speech is
+    0.22–0.93, so there is no click.
+- **Review, through `maclips serve` on a DB copy**
+  (`review-copy/`; the live DB and previews were untouched), for video 3
+  candidate 5:
+  - Only "Tease · 3.4 s" was offered, unchecked.
+  - Asking for payoff was refused ("no valid payoff line inside this clip").
+  - Tease re-rendered the preview at 89.08 s and moved the revision 2→3, and
+    the checklist line appeared.
+  - Off re-rendered at 85.66 s (89.08 − 3.42) with revision 4.
+
 ### 6.6 Share-prompt end card, session 2026-09-25d
 
 The user chose an optional end card (idea 5). It is a Review toggle per clip
@@ -2336,6 +2451,14 @@ punch-in zoom (§4.4 item 8), rendered on all three sources through the real
 CLI (§6.5). Stale-cache defect fixed by bumping S7 3→4, S8 3→4 and S12 2→3.
 Cache keys still hash versions, not code, so any change to a stage's output
 must bump its version.
+
+**Session 2026-09-25 cold-open status [V]:**
+- S5 runs the user-approved prompt (S5 v2). Videos 2 and 3 re-ranked through
+  the real CLI, both passing the ≥5 gate, for $0.1176.
+- The optional cold open is built and rendered on real sources (§6.5).
+- Only 2 of 44 model lines pass the checks (§5.3). That is for the user to
+  decide, as are the new blind sheets and the A/B test on whether the cold
+  open helps.
 
 **Critical path to first earnings:** 1 → 2 → 4 → 5 → 6, with 3 and 8 in parallel.
 

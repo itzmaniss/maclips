@@ -5,7 +5,7 @@ import math
 import re
 import unicodedata
 
-from .ranking import DEFAULT_MAX_DURATION_S, DEFAULT_MIN_DURATION_S
+from .ranking import DEFAULT_MAX_DURATION_S, DEFAULT_MIN_DURATION_S, cold_open_choice
 
 
 class ComplianceError(RuntimeError):
@@ -85,11 +85,21 @@ def validate_clip(clip: dict, brief: dict, clip_class: str) -> None:
     # pending the user's confirmation), so only the overlay rule applies.
     if rules.get("overlays_allowed") is False and clip.get("end_card"):
         raise ComplianceError("end card overlay is forbidden by brief")
+    # A cold open reorders footage. `forbidden_edits` is free text, so that is
+    # a human check (human_checklist); only an unplayable line blocks here [I].
+    try:
+        cold_open_choice(clip)
+    except ValueError as exc:
+        raise ComplianceError(str(exc)) from exc
 
 
-def human_checklist(brief: dict) -> list[str]:
+COLD_OPEN_CHECK = "Cold open reorders the clip — check forbidden edits"
+
+
+def human_checklist(brief: dict, clip: dict | None = None) -> list[str]:
     """Items needing human judgement, deliberately not mechanically marked passed."""
-    items = [f"Human review: no forbidden topic — {topic}" for topic in brief.get("forbidden_topics", []) or []]
+    items = [COLD_OPEN_CHECK] if clip and clip.get("cold_open") not in (None, "", "off") else []
+    items += [f"Human review: no forbidden topic — {topic}" for topic in brief.get("forbidden_topics", []) or []]
     items += [f"Human review: obey edit restriction — {edit}" for edit in brief.get("forbidden_edits", []) or []]
     items.append("Human review: compare against original brief for platform-specific tags, alternative disclosure hashtags, required sounds, source allowlists, account, audience, payout and retention requirements; the schema cannot express these.")
     return items

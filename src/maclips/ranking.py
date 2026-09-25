@@ -346,6 +346,30 @@ def span_problem(span: dict, start_word: int, end_word: int) -> str | None:
     return None
 
 
+def cold_open_modes(clip: dict) -> list[str]:
+    """The cold-open modes this clip may offer: its line passed S5's checks and
+    still lies inside the clip's current (possibly trimmed) word span."""
+    return [m for m in COLD_OPEN_MODES
+            if span_problem(clip.get(m), clip["start_word"], clip["end_word"]) is None]
+
+
+def cold_open_choice(clip: dict) -> tuple[str, dict] | None:
+    """(mode, span) for a clip whose cold open is on; None when it is off.
+
+    Raises ValueError for an unknown mode or a line that cannot play, so the
+    renderer and S11 never trust a stored mode the checks would refuse.
+    """
+    mode = clip.get("cold_open") or "off"
+    if mode == "off":
+        return None
+    if mode not in COLD_OPEN_MODES:
+        raise ValueError(f"unknown cold open mode {mode!r}")
+    problem = span_problem(clip.get(mode), clip["start_word"], clip["end_word"])
+    if problem:
+        raise ValueError(f"cold open {mode} line cannot play: {problem}")
+    return mode, clip[mode]
+
+
 def cold_open_spans(candidate: Candidate, words: Sequence[Any],
                     starts: list[int], ends: list[int]) -> Candidate:
     """Check, snap and time the tease and payoff lines of a snapped, timed clip.

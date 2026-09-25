@@ -5,6 +5,7 @@ from pathlib import Path
 from . import config, db
 from .compliance import ComplianceError, validate_clip, human_checklist
 from .orchestrator import GateFailure
+from .ranking import cold_open_choice
 from .render import end_card_text
 
 
@@ -51,7 +52,10 @@ def export_stage(ctx):
         card=end_card_text(clip)
         if card:
             checklist.append(f'- End card burned into the last {config.END_CARD_SECONDS:g} s: "{card}"')
-        checklist += ['- [ ] '+item for item in human_checklist(brief)]
+        cold=cold_open_choice(clip)
+        if cold:
+            checklist.append(f'- Cold open ({cold[0]}) plays first, then the full clip: "{cold[1]["text"]}"')
+        checklist += ['- [ ] '+item for item in human_checklist(brief,clip)]
         (target/'checklist.md').write_text('\n'.join(checklist)+'\n')
         with db.connect(config.DB_PATH) as conn:
             row=conn.execute('SELECT * FROM clips WHERE id=?',(cid,)).fetchone()

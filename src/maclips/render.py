@@ -10,7 +10,8 @@ from pathlib import Path
 
 from . import config, ffmpeg
 from .layouts import split_divider
-from .pacing import edited_time, half_frame, plan_pacing, video_pieces
+from .pacing import cold_open_keep, combined_words, edited_time, half_frame, plan_pacing, video_pieces
+from .ranking import cold_open_choice
 
 
 class RenderError(RuntimeError):
@@ -53,7 +54,8 @@ def _text(value: object) -> str:
 
 def write_ass(path: Path, words: list[dict], start: float, end: float,
               hook: str, split: bool = False, diagnostic: bool = False,
-              segments: list[dict] | None = None, end_card: str = "") -> None:
+              segments: list[dict] | None = None, end_card: str = "",
+              phrase_break: float | None = None) -> None:
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -80,8 +82,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     # Each word holds until the next word starts, and the last until clip end,
     # so the caption never blinks off between words or across pauses.
     visible = [(a, b, w) for (a, w), b in zip(visible, [a for a, _ in visible[1:]] + [end - start])]
-    for offset in range(0, len(visible), 6):
-        phrase = visible[offset:offset + 6]
+    # Phrases of up to 6 words; a new phrase always starts at `phrase_break`
+    # (the cold-open join), so the line's words never linger after the cut.
+    phrases: list[list] = []
+    for item in visible:
+        crossing = (phrase_break is not None and bool(phrases)
+                    and phrases[-1][-1][0] < phrase_break - 1e-6 <= item[0])
+        if not phrases or len(phrases[-1]) == 6 or crossing:
+            phrases.append([])
+        phrases[-1].append(item)
+    for phrase in phrases:
         for selected, (a, b, _) in enumerate(phrase):
             text = " ".join(("{\\c&H00FFFF&}" + w + "{\\c&HFFFFFF&}")
                             if i == selected else w for i, (_, _, w) in enumerate(phrase))
@@ -245,12 +255,18 @@ def _layout(segment: dict, i: int, width: int, height: int, ow: int, oh: int, zo
     return f",{crop},scale={ow}:{oh}"
 
 
-def _piece_graph(pieces, ss: float, width: int, height: int, ow: int, oh: int) -> str:
+# The cold-open separator: a hard cut, with the clip's first frame drawn white [I].
+FLASH = ",drawbox=x=0:y=0:w=iw:h=ih:color=white:t=fill:enable='eq(n,0)'"
+
+
+def _piece_graph(pieces, ss: float, width: int, height: int, ow: int, oh: int,
+                 flash: int | None = None) -> str:
     count = len(pieces)
     graph = "[0:v]split=" + str(count) + "".join(f"[source{i}]" for i in range(count)) + ";"
     for i, (a, b, segment, zoomed) in enumerate(pieces):
         graph += f"[source{i}]trim=start={a-ss:.6f}:end={b-ss:.6f},setpts=PTS-STARTPTS"
-        graph += _layout(segment, i, width, height, ow, oh, zoomed) + f",setsar=1[segment{i}];"
+        graph += _layout(segment, i, width, height, ow, oh, zoomed) + (FLASH if i == flash else "")
+        graph += f",setsar=1[segment{i}];"
     return graph + "".join(f"[segment{i}]" for i in range(count)) + f"concat=n={count}:v=1:a=0"
 
 
@@ -297,9 +313,10 @@ def render_clip(video: Path, audio: Path, candidate: dict, words: list[dict],
     """Render once, probe hard gates, and atomically publish the complete MP4.
 
     The candidate's `dead_air` and `zoom` toggles (missing = on) edit the
-    timeline inside the same single pass. The planned duration, which the
-    output gate checks, is the edited duration; `duration_range` gates it
-    before encoding.
+    timeline inside the same single pass. A `cold_open` of tease or payoff
+    plays that line first, then a white-flash cut, then the whole clip. The
+    planned duration, which the output gate checks, is the combined edited
+    duration; `duration_range` gates it before encoding.
     """
     start = _number(candidate.get("start"), "start")
     end = _number(candidate.get("end"), "end")
@@ -323,23 +340,42 @@ def render_clip(video: Path, audio: Path, candidate: dict, words: list[dict],
             raise RenderError("source has no usable video stream")
         pacing = plan_pacing(candidate, words, plan, start, end, grid=lambda: _frame_grid(video))
         keeps, switches, duration = pacing["keeps"], pacing["switches"], pacing["duration"]
-        ss = keeps[0][0]
+        try:
+            cold = cold_open_choice(candidate)
+        except ValueError as exc:
+            raise RenderError(str(exc)) from exc
+        lead = []
+        if cold:
+            if pacing["fps"] is None:
+                pacing["fps"], pacing["origin"] = _frame_grid(video)
+            lead = cold_open_keep(float(cold[1]["start"]), float(cold[1]["end"]), pacing["fps"], pacing["origin"])
+            if not lead:
+                raise RenderError("cold open line has no whole frame")
+        # Everything below runs on the combined timeline: the line, then the clip.
+        lead_s = sum(b - a for a, b in lead)
+        order, duration = lead + keeps, lead_s + duration
+        switches = [lead_s + t for t in switches]
+        ss = min(a for a, _ in order)
         if duration_range and not duration_range[0] <= duration <= duration_range[1]:
             raise RenderError(f"edited duration {duration:.3f}s outside "
                               f"{duration_range[0]:g}–{duration_range[1]:g}s")
         ow, oh = (540, 960) if proxy else (1080, 1920)
         base = f"[0:v]trim=duration={duration:.6f},setpts=PTS-STARTPTS"
         pieces = []
-        if len(keeps) > 1 or switches:
+        if len(order) > 1 or switches:
             if pacing["fps"] is None:
                 pacing["fps"], pacing["origin"] = _frame_grid(video)
             fps, origin = pacing["fps"], pacing["origin"]
             spans = [dict(s) for s in segments] if segments else [{**plan, "kind": kind, "start": start, "end": end}]
-            spans[0]["start"], spans[-1]["end"] = min(spans[0]["start"], ss), max(spans[-1]["end"], keeps[-1][1])
+            spans[0]["start"], spans[-1]["end"] = min(spans[0]["start"], ss), max(spans[-1]["end"], *(b for _, b in order))
             for span in spans:
                 span["zoom_ok"] = _zoom_fits(span, width, height)
-            pieces = video_pieces(keeps, spans, switches, lambda t: half_frame(t, fps, origin))
-            vf = _piece_graph(pieces, ss, width, height, ow, oh)
+            pieces = video_pieces(order, spans, switches, lambda t: half_frame(t, fps, origin))
+            placed = [0.0]
+            for a, b, _, _ in pieces:
+                placed.append(placed[-1] + b - a)
+            flash = next(i for i, t in enumerate(placed) if t >= lead_s - 1e-6) if lead else None
+            vf = _piece_graph(pieces, ss, width, height, ow, oh, flash)
         elif segments:
             vf = _segment_graph(segments, start, width, height, ow, oh)
         elif kind == "letterbox":
@@ -358,7 +394,13 @@ def render_clip(video: Path, audio: Path, candidate: dict, words: list[dict],
         # Keep subtitle paths shell/filter-safe even if the user output path is not.
         with tempfile.TemporaryDirectory(prefix="maclips-render-") as scratch:
             ass = Path(scratch) / "captions.ass"
-            if len(keeps) > 1:
+            if lead:
+                # Captions, layout margins, hook and end card on the combined timeline;
+                # margins follow the pieces actually shown.
+                mapped = [{**s, "start": placed[i], "end": placed[i + 1]} for i, (_, _, s, _) in enumerate(pieces)] if segments else None
+                write_ass(ass, combined_words(words, lead, keeps), 0.0, duration, candidate.get("hook_text", ""),
+                          kind == "split", diagnostic, mapped, end_card=end_card_text(candidate), phrase_break=lead_s)
+            elif len(keeps) > 1:
                 # Captions, layout margins and the hook all live on the edited timeline.
                 timed = [{**w, "start": edited_time(float(w["start"]), keeps), "end": edited_time(float(w["end"]), keeps)}
                          for w in words if w.get("start") is not None and w.get("end") is not None]
@@ -374,7 +416,7 @@ def render_clip(video: Path, audio: Path, candidate: dict, words: list[dict],
                 write_ass(ass, words, start, end, candidate.get("hook_text", ""), kind == "split", diagnostic, segments,
                           end_card=end_card_text(candidate))
             vf += f",setsar=1,ass=filename='{ass}'[v];"
-            vf += _audio_graph(keeps, ss)
+            vf += _audio_graph(order, ss)
             fd, temporary = tempfile.mkstemp(prefix=".render-", suffix=".mp4", dir=outpath.parent)
             os.close(fd)
             partial = Path(temporary)
@@ -402,8 +444,10 @@ def render_clip(video: Path, audio: Path, candidate: dict, words: list[dict],
             "layout": kind, "proxy": proxy, "diagnostic": diagnostic,
             "source_span_s": end - start,
             "pacing": {"dead_air": pacing["dead_air"], "zoom": pacing["zoom"],
-                       "cuts": len(keeps) - 1, "removed_s": (end - start) - duration,
+                       "cuts": len(keeps) - 1, "removed_s": (end - start) - (duration - lead_s),
                        "keeps": keeps, "triggers": pacing["triggers"], "switches": switches,
                        "fps": pacing["fps"],
-                       "pieces": [{"source": [a, b], "edited_start": edited_time(a, keeps),
-                                   "kind": s["kind"], "zoomed": z} for a, b, s, z in pieces]}}
+                       "pieces": [{"source": [a, b], "edited_start": edited_time(a, keeps) if not lead else placed[i],
+                                   "kind": s["kind"], "zoomed": z} for i, (a, b, s, z) in enumerate(pieces)]},
+            "cold_open": {"mode": cold[0], "source": list(lead[0]), "duration_s": lead_s,
+                          "text": cold[1].get("text", "")} if lead else None}
