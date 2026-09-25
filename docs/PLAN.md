@@ -836,6 +836,9 @@ This approach uses only clean components (Apple Vision, pyannote community-1, yo
    - The left-in-source person goes on top, consistently.
    - Captions sit at the seam.
    - Split-screen needs pieces 1 and 3 but **not** piece 2, which is why it is the safe fallback.
+6b. **Dim the non-speaking person (step 7; user decision 2026-09-25: deferred to step 7, not built before G1).**
+   - In side-by-side and split-screen shots, the speaker stays at full brightness and the other person is slightly dimmed.
+   - It needs turn attribution (items 3–4), so it sits behind the same S7 confidence gate as follow-crop. Dimming the wrong person is worse than no dimming.
 7. **Speaker with no face track** (off-screen or looking away). Hold the previous segment. If that runs longer than ~3 s, fall back to split-screen or letterbox for that span.
 
 **Known failure modes, and what catches them**
@@ -1953,6 +1956,16 @@ duplication.
 The new crop rule is in §4.4 item 6. Case 2 no longer splits: those shots
 become face-centred at x≈0.89. That 9:16 column holds both insets once, plus a
 strip of the screen share [I; the user should judge].
+Segments changed from split to face-centred [V]:
+- **Candidate 2:** 614.47 s and 649.05 s.
+- **Candidate 3:** 719.28 s, 823.58 s and 842.38 s.
+- **Candidate 4:** 891.77 s and 942.39 s.
+
+**Flag for the user [I]:** the face-centred fallback drops most of the
+screen share, and the Lovable brief requires showing the product. The
+letterbox option is still offered per clip in Review and keeps the whole
+screen. Choosing it is the user's call; the tool does not switch
+automatically.
 Crops after the fix (source 1920×1080 unless stated; upscale = 960 / crop height):
 
 | Source | Split segments | Crop heights (px) | Upscale range |
@@ -2125,7 +2138,7 @@ Each step has a "done when". Arrows show what it blocks.
 | 5 | **Minimal Review + render.** Ingest and Review tabs; centre-crop and letterbox layouts; ASS word-highlight captions; hook overlay; one-pass final render; export bundle; Posted tab. | **You can run a real campaign end to end.** Start doing campaigns here. | 6, 8 |
 | 6 | **S6 face tracks** via pyobjc + Vision; `scdet` shots; **split-screen layout**; face-centred crop for single-face shots. | Split-screen previews correct on two-shot sources. | Trial |
 | **G1** | **Business trial (§1.5).** Run real campaigns on steps 1–6 for 4 weeks or 5 campaigns. Throughput logged per §6.4. | Kill criteria evaluated with real numbers. | **7, 9** |
-| 7 | **Eval set + S7 attribution + follow-crop**, only if G1 passes. Labelling mode, attribution, layout planner, confidence gate calibrated per §4.6, plus the cut-vs-pan test (§4.4). | Measured accuracy on the labelled set, the gate threshold set, and the transition style chosen. | 9 (conditional) |
+| 7 | **Eval set + S7 attribution + follow-crop**, only if G1 passes. Labelling mode, attribution, layout planner, confidence gate calibrated per §4.6, plus the cut-vs-pan test (§4.4). Dim-the-non-speaker in two-person shots, behind the same confidence gate (§4.4 item 6b; user decision 2026-09-25). | Measured accuracy on the labelled set, the gate threshold set, and the transition style chosen. | 9 (conditional) |
 | 8 | **S11 full compliance checks + class/account routing.** Build alongside step 5; don't defer it. | Gates provably block each violation type (one test clip per rule). | — |
 | 9 | **Conditional: Light-ASD escalation** (§4.5), only if step 7 misses the threshold after heuristic tuning. | Accuracy clears the threshold, or you accept split-screen as the two-shot default. | — |
 
