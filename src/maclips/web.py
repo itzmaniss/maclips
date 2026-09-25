@@ -116,7 +116,7 @@ def index(request:Request,tab:str='ingest',source:int|None=None,clip:int|None=No
             item['campaign_name']=src['state'].get('brief',{}).get('campaign_name') or 'Own content'
             item['deadline_at']=row['posted_at']+window*60 if row['posted_at'] and window else None
             posts.append(item)
-    return templates.TemplateResponse(request=request,name='app.html',context={'tab':tab,'sources':sources,'campaigns':campaigns,'source':selected,'clips':clips,'clip':chosen,'words':words,'brief':brief,'checklist':human_checklist(brief),'mechanical':mechanical,'timing':timing,'posts':posts,'preview_count':sum(len(c['data'].get('previews',{})) for c in clips),'csrf':CSRF,'jobs':JOBS})
+    return templates.TemplateResponse(request=request,name='app.html',context={'tab':tab,'sources':sources,'campaigns':campaigns,'source':selected,'clips':clips,'clip':chosen,'words':words,'brief':brief,'checklist':human_checklist(brief),'mechanical':mechanical,'end_card_default':config.END_CARD_TEXT,'end_card_max':config.END_CARD_MAX_CHARS,'end_card_seconds':config.END_CARD_SECONDS,'timing':timing,'posts':posts,'preview_count':sum(len(c['data'].get('previews',{})) for c in clips),'csrf':CSRF,'jobs':JOBS})
 
 
 @app.get('/media/{cid}/{layout}')
@@ -211,7 +211,12 @@ def edit_clip(cid,payload):
     if not 0<=start<=end<len(words): raise ValueError('word bounds out of range')
     a,b=words[start].get('start'),words[end].get('end')
     if a is None or b is None or b<=a: raise ValueError('selected boundaries have no usable aligned timing')
-    data.update(start_word=start,end_word=end,start=a,end=b,duration=b-a,hook_text=str(payload.get('hook_text',data.get('hook_text',''))))
+    card=payload.get('end_card',data.get('end_card',False))
+    if not isinstance(card,bool): raise ValueError('end card toggle must be true or false')
+    card_text=str(payload.get('end_card_text',data.get('end_card_text') or config.END_CARD_TEXT)).strip()
+    if not 0<len(card_text)<=config.END_CARD_MAX_CHARS: raise ValueError(f'end card text must be 1–{config.END_CARD_MAX_CHARS} characters')
+    data.update(start_word=start,end_word=end,start=a,end=b,duration=b-a,hook_text=str(payload.get('hook_text',data.get('hook_text',''))),
+                end_card=card,end_card_text=card_text)
     layout=payload.get('layout') or data.get('layout') or next(iter(data['previews']))
     plans=state['plans'][str(data['rank'])]
     if layout not in plans: raise ValueError('layout unavailable')

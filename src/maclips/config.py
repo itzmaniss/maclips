@@ -138,3 +138,9 @@ def estimated_cost_usd(model: str, input_tokens: int, output_tokens: int) -> flo
 
 # Installed macOS system font used by libass.
 CAPTION_FONT = os.getenv("MACLIPS_CAPTION_FONT", "Helvetica")
+
+# Share-prompt end card (PLAN.md §6.6). Off by default per clip; the text is
+# this constant unless the reviewer edits it. Never model-generated.
+END_CARD_TEXT = "Send this to someone who needs to hear it"
+END_CARD_SECONDS = 3.0
+END_CARD_MAX_CHARS = 60

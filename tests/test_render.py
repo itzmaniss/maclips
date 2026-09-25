@@ -219,3 +219,93 @@ def test_stacked_or_touching_faces_are_not_split():
     stacked = [[0.863, 0.812, 0.063, 0.112], [0.859, 0.476, 0.055, 0.099]]
     with pytest.raises(render.RenderError, match="too close"):
         render._split_crops(stacked, 1920, 1080)
+
+
+# --- Share-prompt end card (PLAN.md §6.6) ---------------------------------- #
+
+def end_card_events(text):
+    import re
+    return re.findall(r'^Dialogue: 1,([^,]+),([^,]+),EndCard,,0,0,0,,(.*)$', text, re.M)
+
+
+def ass_from_render(tmp_path, monkeypatch, candidate, proxy=True):
+    source = tmp_path / "source.mp4"; source.touch()
+    seen = []
+    monkeypatch.setattr(render.ffmpeg, "probe", lambda path: info(width=1920, height=1080) if path == source
+                        else info(duration_s=candidate["end"]-candidate["start"],
+                                  width=540 if proxy else 1080, height=960 if proxy else 1920))
+    def run(cmd):
+        ass_path = cmd[cmd.index("-filter_complex")+1].split("ass=filename='")[1].split("'")[0]
+        seen.append(Path(ass_path).read_text()); Path(cmd[-1]).write_bytes(b"media")
+    monkeypatch.setattr(render.ffmpeg, "_run", run)
+    render.render_clip(source, source, candidate, [], "centre", tmp_path / "out.mp4", proxy=proxy)
+    return seen[0]
+
+
+def test_end_card_off_by_default(tmp_path, monkeypatch):
+    text = ass_from_render(tmp_path, monkeypatch, {"start": 5, "end": 17, "hook_text": "hook"})
+    assert end_card_events(text) == []
+    assert render.end_card_text({"end_card_text": "set but not on"}) == ""
+    assert render.end_card_text({"end_card": "yes"}) == ""
+
+
+@pytest.mark.parametrize("proxy", [True, False])
+def test_end_card_final_seconds_identical_in_preview_and_final(tmp_path, monkeypatch, proxy):
+    text = ass_from_render(tmp_path, monkeypatch, {"start": 5, "end": 17.5, "hook_text": "hook", "end_card": True},
+                           proxy=proxy)
+    assert end_card_events(text) == [("0:00:09.50", "0:00:12.50", config.END_CARD_TEXT)]
+
+
+def test_end_card_times_against_rendered_duration_and_edited_text(tmp_path):
+    path = tmp_path / "card.ass"
+    render.write_ass(path, [], 100, 130.25, "", end_card=render.end_card_text(
+        {"end_card": True, "end_card_text": " {\\pos(1,1)}Share it "}))
+    ((a, b, body),) = end_card_events(path.read_text())
+    assert (a, b) == ("0:00:27.25", "0:00:30.25")
+    assert "\\pos" not in body and body.startswith("(")
+
+
+def test_end_card_never_shares_screen_time_with_hook(tmp_path):
+    path = tmp_path / "card.ass"
+    render.write_ass(path, [], 0, 6, "hook", end_card="card")
+    assert end_card_events(path.read_text()) == [("0:00:03.00", "0:00:06.00", "card")]
+    with pytest.raises(render.RenderError, match="too short"):
+        render.write_ass(path, [], 0, 5.9, "hook", end_card="card")
+    render.write_ass(path, [], 0, 4, "", end_card="card")  # no hook: only the card's own length
+
+
+@pytest.mark.parametrize("text", [" ", "x" * (config.END_CARD_MAX_CHARS + 1)])
+def test_end_card_text_bounds_stop_render(text):
+    with pytest.raises(render.RenderError, match="end card text"):
+        render.end_card_text({"end_card": True, "end_card_text": text})
+
+
+def _lit_rows(tmp_path, name, ass_text, at):
+    """Rows libass actually draws on a black 1080x1920 frame at `at` seconds."""
+    import subprocess
+    ass = tmp_path / f"{name}.ass"; ass.write_text(ass_text)
+    frame = subprocess.run([str(config.FFMPEG), "-loglevel", "error", "-f", "lavfi", "-i",
+                            "color=black:s=1080x1920:r=10:d=20", "-vf", f"ass=filename='{ass}'",
+                            "-ss", str(at), "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+                           check=True, capture_output=True).stdout
+    rows = [y for y in range(1920) if max(frame[y*1080:(y+1)*1080]) > 24]
+    assert rows, "nothing was drawn"
+    return min(rows), max(rows)
+
+
+def test_end_card_band_clears_captions_in_every_layout(tmp_path):
+    # Worst cases drawn by the real libass: the longest allowed card of wide
+    # glyphs, and a six-word phrase of wide words, at the bottom and the seam.
+    card = " ".join(["WMWMW"] * 12)[:config.END_CARD_MAX_CHARS]
+    card_ass = tmp_path / "card-src.ass"
+    render.write_ass(card_ass, [], 0, 20, "", end_card=card)
+    card_top, card_bottom = _lit_rows(tmp_path, "card", card_ass.read_text(), 18.5)
+    words = [{"text": "WMWMWMWMW", "start": i * .1, "end": i * .1 + .1} for i in range(6)]
+    for split in (False, True):
+        cap = tmp_path / f"captions-src-{split}.ass"
+        render.write_ass(cap, words, 0, 20, "", split=split)
+        caption_top, _ = _lit_rows(tmp_path, f"captions-{split}", cap.read_text(), 18.5)
+        assert card_bottom < caption_top - 100, (split, card_bottom, caption_top)
+    diag = tmp_path / "diag-src.ass"
+    render.write_ass(diag, [], 0, 20, "", diagnostic=True)
+    assert _lit_rows(tmp_path, "diag", diag.read_text(), 18.5)[1] < card_top

@@ -81,6 +81,10 @@ def validate_clip(clip: dict, brief: dict, clip_class: str) -> None:
             raise ComplianceError(f"missing required phrase: {phrase}")
     if rules.get("overlays_allowed") is False and str(clip.get("hook_text", "")).strip():
         raise ComplianceError("hook overlay is forbidden by brief")
+    # The share-prompt end card is an overlay, not a CTA (PLAN.md §6.6, [I],
+    # pending the user's confirmation), so only the overlay rule applies.
+    if rules.get("overlays_allowed") is False and clip.get("end_card"):
+        raise ComplianceError("end card overlay is forbidden by brief")
 
 
 def human_checklist(brief: dict) -> list[str]:

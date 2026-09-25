@@ -1705,6 +1705,10 @@ A local web app served from the Mac: a Python backend in the same process as the
   - Click a word to set in or out. Edits snap to word boundaries.
   - Edits re-render only that preview.
 - **Hook text:** editable inline.
+- **Share-prompt end card:** a per-clip toggle, **off by default**, plus
+  editable text (default `config.END_CARD_TEXT`, never model-generated).
+  Toggling or saving the text re-renders only that preview and revokes any
+  approval, like a trim (§6.6) [V].
 - **Right: brief panel.** The brief's rules as a checklist, with mechanical items pre-evaluated.
 - **Actions:**
   - **Approve** opens the commentary control: Write / Auto-generate / None.
@@ -2058,6 +2062,62 @@ checkpoints are in `work/session-20260925b/old-checkpoints/`.
   shots.
 
 Whether any of the layouts is right is still the user's call.
+
+### 6.6 Share-prompt end card, session 2026-09-25d
+
+The user chose an optional end card (idea 5). It is a Review toggle per clip
+and is **off by default**. For the clip's final `END_CARD_SECONDS` (3 s) it
+burns in one line: by default "Send this to someone who needs to hear it"
+(`config.END_CARD_TEXT`), editable per clip, 1–60 characters, never generated.
+
+- **Storage [V].** `end_card` (bool) and `end_card_text` live in the clip's
+  `data_json`, which is what S8 (via `effective_candidate`) and S12 (via the
+  approved snapshot) both pass to `render_clip`. An edit clears
+  `review_decision`, `render_path` and draft posts, so changing the card after
+  approval revokes it. The approval request does not accept end-card fields;
+  the card can only change through a re-rendering edit.
+- **Timing [V].** The card starts at `rendered duration − 3 s`. The only
+  duration source is `end - start` at the `_end_card_events` call in
+  `write_ass`. If cuts shorten the rendered timeline, that argument must become
+  the post-cut duration. A card that would overlap the 3 s hook stops the
+  render (clips under 6 s with a hook, or under 3 s without one).
+- **Placement [I].** Top-centred band, `EndCard` style: Helvetica bold 52,
+  white with outline, `MarginV` 100 (PlayRes 1080×1920). It is fixed for every
+  layout. Captions sit at the bottom (MarginV 230) or the split seam (880).
+  The hook uses the same top area but only in the first 3 s. Measured with
+  real libass on a black frame [V]: the default card draws on rows 109–142, and
+  the worst allowed 60-character card on rows 110–245. Worst-case captions
+  start at row 1,527 (bottom) or 877 (seam), and the diagnostic label ends
+  above row 109. A test enforces a gap of at least 100 px. The card can
+  overlap the top of a head in close face-centred crops. That is the same
+  limitation as the hook, and the user should judge it.
+- **CTA classification [I], for the user to confirm.** §1.4's CTA means
+  redirecting viewers to monetised videos, and a share prompt does not do that.
+  S11 therefore does **not** treat the end card as a CTA, and a campaign clip
+  may carry it. If the user decides otherwise, add it to the CTA rule.
+- **S11 [V].** A brief with `overlays_allowed` false blocks a clip with the
+  card on ("end card overlay is forbidden by brief"), the same way hook text
+  is blocked. Each rule has a fixture test: blocked under `overlays_allowed`
+  false, and allowed on a campaign clip otherwise (not a CTA).
+- **S13 [V].** `checklist.md` names the card and its text when it is on.
+
+**Real check [V].** Video 3 candidate 1 (split, 86.091 s planned). A copy of
+the SQLite DB had that source's `workdir` redirected to
+`work/session-20260925d/review-copy/`, so the live previews and DB rows were
+not touched. Through `maclips serve`, Playwright ticked the toggle, and the
+normal Review edit path re-rendered one preview in 7.55 s (wall 9.1 s in the
+browser).
+- Card off (existing preview) and card on: both **540×960, 86.100 s**, audio
+  present.
+- Frames compared with the card-off preview: at 80.0 s, **0** pixels differ by
+  more than 60 grey levels. At 84.5 s, inside the card window (83.09–86.09 s),
+  **4,445** pixels differ in the top band (rows 40–140 of 960) and **0**
+  elsewhere.
+- Playwright: the toggle was visible and unchecked, the revision went 4 → 5
+  and the box stayed checked after the reload, with 0 page errors. No approval,
+  brief confirmation, export or post was made.
+- Evidence is in `work/session-20260925d/`: `{on,off}-{80.0,84.5}s.png` and
+  `ui-endcard-{off,on}.png`.
 
 ## 7. Campaign workflow
 
