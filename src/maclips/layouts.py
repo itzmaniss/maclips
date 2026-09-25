@@ -17,6 +17,11 @@ def split_divider(boxes):
     return divider
 
 
+def _face(box):
+    # Centre for the crop, plus the box so the punch-in zoom can keep the face in frame.
+    return {'kind':'face-centred','x':box[0]+box[2]/2,'y':box[1]+box[3]/2,'box':list(box)}
+
+
 def plan_layouts(analysis):
     plans={}
     for cid,result in analysis.items():
@@ -36,10 +41,10 @@ def plan_layouts(analysis):
                     has_split=True;has_face=True
                 else:
                     # Fragments, or faces too close for separate panels: longest track.
-                    segment.update(kind='face-centred',x=tracks[0]['median_box'][0]+tracks[0]['median_box'][2]/2)
+                    segment.update(_face(tracks[0]['median_box']))
                     has_face=True
             elif tracks:
-                box=tracks[0]['median_box'];segment.update(kind='face-centred',x=box[0]+box[2]/2);has_face=True
+                segment.update(_face(tracks[0]['median_box']));has_face=True
             segments.append(segment)
         options={}
         if has_face:
@@ -48,3 +53,28 @@ def plan_layouts(analysis):
         options['letterbox']={'kind':'letterbox'}
         plans[cid]=options
     return plans
+
+
+def speaker_changes(words,turns):
+    """Source times where the S4 speaker label changes between consecutive words.
+
+    Words are labelled from the window's diarized turns with `assign_speakers`,
+    the overlap rule S4 itself uses. Words inside no turn stay unlabelled and
+    never trigger a change. Labels are window-local (§2.2 item 1).
+    """
+    if not turns:
+        return []
+    from .diarize import DiarizationResult,Turn,assign_speakers
+    from .transcribe import Word
+    low=min(t['start'] for t in turns);high=max(t['end'] for t in turns)
+    inside=[Word(**{k:w.get(k) for k in ('word','start','end','score')}) for w in words
+            if w.get('start') is not None and w.get('end') is not None and low<=w['start']<high]
+    assign_speakers(inside,DiarizationResult(turns=[Turn(float(t['start']),float(t['end']),str(t['speaker'])) for t in turns]))
+    changes=[];previous=None
+    for word in sorted(inside,key=lambda w:w.start):
+        if word.speaker is None:
+            continue
+        if previous is not None and word.speaker!=previous:
+            changes.append(word.start)
+        previous=word.speaker
+    return changes

@@ -1,6 +1,7 @@
 """Static-layout single-pass rendering from original split video/audio streams."""
 from __future__ import annotations
 
+import json
 import math
 import os
 import tempfile
@@ -9,6 +10,7 @@ from pathlib import Path
 
 from . import config, ffmpeg
 from .layouts import split_divider
+from .pacing import edited_time, half_frame, plan_pacing, video_pieces
 
 
 class RenderError(RuntimeError):
@@ -138,6 +140,22 @@ def _crop(cx: float, aspect: float, width: int, height: int) -> str:
     return f"crop={crop_width}:{height}:{x}:0"
 
 
+def _zoom_crop(cx: float, cy: float, width: int, height: int, zoom: float) -> str:
+    """The normal full-height crop scaled by 1/zoom about the face centre.
+
+    The face keeps its on-screen position and grows by `zoom`; the crop is then
+    clamped to the frame.
+    """
+    crop_height = int(height / zoom) // 2 * 2
+    crop_width = min(width, int(crop_height * 9 / 16) // 2 * 2)
+    base_width = min(width, int(height * 9 / 16) // 2 * 2)
+    base_x = max(0, min(width - base_width, round(cx * width - base_width / 2))) // 2 * 2
+    fx, fy = cx * width, cy * height
+    x = max(0, min(width - crop_width, round(fx - (fx - base_x) / zoom))) // 2 * 2
+    y = max(0, min(height - crop_height, round(fy - fy / zoom))) // 2 * 2
+    return f"crop={crop_width}:{crop_height}:{x}:{y}"
+
+
 
 def clipped_segments(segments: list[dict], start: float, end: float) -> list[dict]:
     """Allow trimming inside a saved plan, but never leave a gap or overlap."""
@@ -167,32 +185,78 @@ def clipped_segments(segments: list[dict], start: float, end: float) -> list[dic
     return clipped
 
 
+def _layout(segment: dict, i: int, width: int, height: int, ow: int, oh: int, zoomed: bool = False) -> str:
+    kind = segment["kind"]
+    if kind == "letterbox":
+        return f",scale={ow}:{oh}:force_original_aspect_ratio=decrease,pad={ow}:{oh}:(ow-iw)/2:(oh-ih)/2:black"
+    if kind == "split":
+        top, bottom = _split_crops(segment.get("boxes"), width, height)
+        return (f",split=2[top{i}][bottom{i}];[top{i}]{top},scale={ow}:{oh//2}[t{i}];"
+                f"[bottom{i}]{bottom},scale={ow}:{oh//2}[b{i}];[t{i}][b{i}]vstack=inputs=2")
+    cx = _number(segment.get("x", .5), "face centre") if kind == "face-centred" else .5
+    cy = _number(segment.get("y", .4), "face centre") if kind == "face-centred" else .4
+    if not (0 <= cx <= 1 and 0 <= cy <= 1):
+        raise RenderError("face centre lies outside source")
+    crop = _zoom_crop(cx, cy, width, height, config.ZOOM_FACTOR) if zoomed else _crop(cx, 9/16, width, height)
+    return f",{crop},scale={ow}:{oh}"
+
+
+def _piece_graph(pieces, ss: float, width: int, height: int, ow: int, oh: int) -> str:
+    count = len(pieces)
+    graph = "[0:v]split=" + str(count) + "".join(f"[source{i}]" for i in range(count)) + ";"
+    for i, (a, b, segment, zoomed) in enumerate(pieces):
+        graph += f"[source{i}]trim=start={a-ss:.6f}:end={b-ss:.6f},setpts=PTS-STARTPTS"
+        graph += _layout(segment, i, width, height, ow, oh, zoomed) + f",setsar=1[segment{i}];"
+    return graph + "".join(f"[segment{i}]" for i in range(count)) + f"concat=n={count}:v=1:a=0"
+
+
 def _segment_graph(segments: list[dict], start: float, width: int, height: int,
                    ow: int, oh: int) -> str:
-    count = len(segments)
-    graph = "[0:v]split=" + str(count) + "".join(f"[source{i}]" for i in range(count)) + ";"
-    for i, segment in enumerate(segments):
-        graph += f"[source{i}]trim=start={segment['start']-start:.6f}:end={segment['end']-start:.6f},setpts=PTS-STARTPTS"
-        kind = segment["kind"]
-        if kind == "letterbox":
-            graph += f",scale={ow}:{oh}:force_original_aspect_ratio=decrease,pad={ow}:{oh}:(ow-iw)/2:(oh-ih)/2:black"
-        elif kind == "split":
-            top, bottom = _split_crops(segment.get("boxes"), width, height)
-            graph += f",split=2[top{i}][bottom{i}];"
-            graph += f"[top{i}]{top},scale={ow}:{oh//2}[t{i}];"
-            graph += f"[bottom{i}]{bottom},scale={ow}:{oh//2}[b{i}];[t{i}][b{i}]vstack=inputs=2"
-        else:
-            cx = _number(segment.get("x", .5), "face centre") if kind == "face-centred" else .5
-            if not 0 <= cx <= 1:
-                raise RenderError("face centre lies outside source")
-            graph += f",{_crop(cx,9/16,width,height)},scale={ow}:{oh}"
-        graph += f",setsar=1[segment{i}];"
-    return graph + "".join(f"[segment{i}]" for i in range(count)) + f"concat=n={count}:v=1:a=0"
+    return _piece_graph([(s["start"], s["end"], s, False) for s in segments], start, width, height, ow, oh)
+
+
+def _audio_graph(keeps: list[tuple[float, float]], ss: float) -> str:
+    loud = "loudnorm=I=-14:TP=-1.5:LRA=11[a]"
+    if len(keeps) == 1:
+        return f"[1:a]atrim=duration={keeps[0][1]-keeps[0][0]:.6f},asetpts=PTS-STARTPTS,{loud}"
+    fade, count = config.DEAD_AIR_XFADE_S, len(keeps)
+    # Each keep but the last takes `fade` more from the next cut's silent pad;
+    # acrossfade overlaps exactly that much, so no join shifts the audio.
+    graph = f"[1:a]asplit={count}" + "".join(f"[x{i}]" for i in range(count)) + ";"
+    for i, (a, b) in enumerate(keeps):
+        tail = fade if i < count - 1 else 0.0
+        graph += f"[x{i}]atrim=start={a-ss:.6f}:end={b-ss+tail:.6f},asetpts=PTS-STARTPTS[p{i}];"
+    return graph + "".join(f"[p{i}]" for i in range(count)) + f"acrossfade=n={count}:d={fade}:c1=tri:c2=tri,{loud}"
+
+
+def _frame_grid(video: Path) -> tuple[float, float]:
+    """(fps, first-frame offset) of the source video, as ffmpeg's -ss sees it."""
+    proc = ffmpeg._run([str(config.FFPROBE), "-v", "error", "-select_streams", "v:0",
+                        "-show_entries", "stream=r_frame_rate,start_time:format=start_time",
+                        "-of", "json", str(video)], timeout=120.0)
+    try:
+        data = json.loads(proc.stdout)
+        num, _, den = data["streams"][0]["r_frame_rate"].partition("/")
+        fps = float(num) / float(den or 1)
+        origin = float(data["streams"][0].get("start_time") or 0) - float(data.get("format", {}).get("start_time") or 0)
+    except (KeyError, IndexError, ValueError, ZeroDivisionError, json.JSONDecodeError) as exc:
+        raise RenderError("could not read the source frame rate") from exc
+    if not (math.isfinite(fps) and fps > 0):
+        raise RenderError("could not read the source frame rate")
+    return fps, origin
+
 
 def render_clip(video: Path, audio: Path, candidate: dict, words: list[dict],
                 layout: dict | str, out_path: Path, *, proxy: bool = True,
-                diagnostic: bool = False) -> dict:
-    """Render once, probe hard gates, and atomically publish the complete MP4."""
+                diagnostic: bool = False,
+                duration_range: tuple[float, float] | None = None) -> dict:
+    """Render once, probe hard gates, and atomically publish the complete MP4.
+
+    The candidate's `dead_air` and `zoom` toggles (missing = on) edit the
+    timeline inside the same single pass. The planned duration, which the
+    output gate checks, is the edited duration; `duration_range` gates it
+    before encoding.
+    """
     start = _number(candidate.get("start"), "start")
     end = _number(candidate.get("end"), "end")
     if start < 0 or end <= start:
@@ -206,7 +270,6 @@ def render_clip(video: Path, audio: Path, candidate: dict, words: list[dict],
         raise RenderError("original video or audio is missing")
     if outpath in (video, audio):
         raise RenderError("output may not replace an original input")
-    duration = end - start
     segments = clipped_segments(plan["segments"], start, end) if "segments" in plan else None
     begun = time.perf_counter()
     try:
@@ -214,9 +277,24 @@ def render_clip(video: Path, audio: Path, candidate: dict, words: list[dict],
         width, height = int(source.get("width", 0)), int(source.get("height", 0))
         if not source.get("has_video") or min(width, height) <= 0:
             raise RenderError("source has no usable video stream")
+        pacing = plan_pacing(candidate, words, plan, start, end, grid=lambda: _frame_grid(video))
+        keeps, switches, duration = pacing["keeps"], pacing["switches"], pacing["duration"]
+        ss = keeps[0][0]
+        if duration_range and not duration_range[0] <= duration <= duration_range[1]:
+            raise RenderError(f"edited duration {duration:.3f}s outside "
+                              f"{duration_range[0]:g}–{duration_range[1]:g}s")
         ow, oh = (540, 960) if proxy else (1080, 1920)
         base = f"[0:v]trim=duration={duration:.6f},setpts=PTS-STARTPTS"
-        if segments:
+        pieces = []
+        if len(keeps) > 1 or switches:
+            if pacing["fps"] is None:
+                pacing["fps"], pacing["origin"] = _frame_grid(video)
+            fps, origin = pacing["fps"], pacing["origin"]
+            spans = [dict(s) for s in segments] if segments else [{**plan, "kind": kind, "start": start, "end": end}]
+            spans[0]["start"], spans[-1]["end"] = min(spans[0]["start"], ss), max(spans[-1]["end"], keeps[-1][1])
+            pieces = video_pieces(keeps, spans, switches, lambda t: half_frame(t, fps, origin))
+            vf = _piece_graph(pieces, ss, width, height, ow, oh)
+        elif segments:
             vf = _segment_graph(segments, start, width, height, ow, oh)
         elif kind == "letterbox":
             vf = base + f",scale={ow}:{oh}:force_original_aspect_ratio=decrease,pad={ow}:{oh}:(ow-iw)/2:(oh-ih)/2:black"
@@ -234,16 +312,28 @@ def render_clip(video: Path, audio: Path, candidate: dict, words: list[dict],
         # Keep subtitle paths shell/filter-safe even if the user output path is not.
         with tempfile.TemporaryDirectory(prefix="maclips-render-") as scratch:
             ass = Path(scratch) / "captions.ass"
-            write_ass(ass, words, start, end, candidate.get("hook_text", ""), kind == "split", diagnostic, segments)
+            if len(keeps) > 1:
+                # Captions, layout margins and the hook all live on the edited timeline.
+                timed = [{**w, "start": edited_time(float(w["start"]), keeps), "end": edited_time(float(w["end"]), keeps)}
+                         for w in words if w.get("start") is not None and w.get("end") is not None]
+                mapped = None
+                if segments:
+                    mapped = [{**s, "start": 0.0 if i == 0 else edited_time(s["start"], keeps),
+                               "end": duration if i == len(segments) - 1 else edited_time(s["end"], keeps)}
+                              for i, s in enumerate(segments)]
+                    mapped = [s for s in mapped if s["end"] > s["start"]]
+                write_ass(ass, timed, 0.0, duration, candidate.get("hook_text", ""), kind == "split", diagnostic, mapped)
+            else:
+                write_ass(ass, words, start, end, candidate.get("hook_text", ""), kind == "split", diagnostic, segments)
             vf += f",setsar=1,ass=filename='{ass}'[v];"
-            vf += f"[1:a]atrim=duration={duration:.6f},asetpts=PTS-STARTPTS,loudnorm=I=-14:TP=-1.5:LRA=11[a]"
+            vf += _audio_graph(keeps, ss)
             fd, temporary = tempfile.mkstemp(prefix=".render-", suffix=".mp4", dir=outpath.parent)
             os.close(fd)
             partial = Path(temporary)
             try:
                 command = [str(config.FFMPEG), "-y", "-nostdin", "-loglevel", "error",
-                           "-ss", f"{start:.6f}", "-i", str(video),
-                           "-ss", f"{start:.6f}", "-i", str(audio),
+                           "-ss", f"{ss:.6f}", "-i", str(video),
+                           "-ss", f"{ss:.6f}", "-i", str(audio),
                            "-filter_complex", vf, "-map", "[v]", "-map", "[a]",
                            "-c:v", "h264_videotoolbox" if proxy else "libx264"]
                 command += ["-b:v", "2500k"] if proxy else ["-preset", "fast", "-crf", "18"]
@@ -261,4 +351,11 @@ def render_clip(video: Path, audio: Path, candidate: dict, words: list[dict],
             "probe": measured, "actual_duration_s": measured["duration_s"],
             "width": measured["width"], "height": measured["height"],
             "has_audio": measured["has_audio"], "wall_s": time.perf_counter() - begun,
-            "layout": kind, "proxy": proxy, "diagnostic": diagnostic}
+            "layout": kind, "proxy": proxy, "diagnostic": diagnostic,
+            "source_span_s": end - start,
+            "pacing": {"dead_air": pacing["dead_air"], "zoom": pacing["zoom"],
+                       "cuts": len(keeps) - 1, "removed_s": (end - start) - duration,
+                       "keeps": keeps, "triggers": pacing["triggers"], "switches": switches,
+                       "fps": pacing["fps"],
+                       "pieces": [{"source": [a, b], "edited_start": edited_time(a, keeps),
+                                   "kind": s["kind"], "zoomed": z} for a, b, s, z in pieces]}}

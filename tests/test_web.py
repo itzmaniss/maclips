@@ -118,3 +118,24 @@ def test_stale_decision_does_not_approve(studio):
         conn.execute('UPDATE clips SET data_json=? WHERE id=?',(json.dumps(data),cid))
     response=client.post(f'/clips/{cid}/decision',headers=headers,json={'decision':'approved','revision':0})
     assert response.status_code==400 and 'reload' in response.text
+
+
+def test_pacing_toggle_rerenders_only_that_preview_and_is_saved(studio,monkeypatch):
+    client,headers,sid,cid=studio
+    from maclips import render
+    calls=[]
+    def fake(video,audio,candidate,words,layout,path,**kw):
+        calls.append((candidate.get('dead_air',True),candidate.get('zoom',True),Path(path).parent))
+        return {'path':str(path),'wall_s':0,'width':540,'height':960}
+    monkeypatch.setattr(render,'render_clip',fake)
+    web.edit_clip(cid,{'layout':'centre','dead_air':False,'zoom':True})
+    web.edit_clip(cid,{'layout':'centre','zoom':False,'revision':1})
+    # Toggles persist per clip, and the preview is re-rendered in its existing folder.
+    assert [c[:2] for c in calls]==[(False,True),(False,False)]
+    assert calls[0][2]==config.DB_PATH.parent
+    with db.connect(config.DB_PATH) as conn:
+        data=json.loads(conn.execute('SELECT data_json FROM clips WHERE id=?',(cid,)).fetchone()[0])
+    assert (data['dead_air'],data['zoom'],list(data['previews']))==(False,False,['centre'])
+    with pytest.raises(ValueError,match='dead_air must be true or false'):
+        web.edit_clip(cid,{'layout':'centre','dead_air':'no','revision':2})
+    assert client.get('/',params={'tab':'review','source':sid}).status_code==200

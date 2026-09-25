@@ -66,8 +66,10 @@ if (editor) {
   const selectedLayout = () => layout.value;
   const edit = async extra => {
     if (startWord > endWord) throw new Error('In must come before out.');
-    await waitJob(await request(`/clips/${clipId}/edit`, {revision:Number(editor.dataset.revision),start_word:startWord, end_word:endWord, hook_text:$('#hook-text').value, layout:selectedLayout(), ...extra}));
+    await waitJob(await request(`/clips/${clipId}/edit`, {revision:Number(editor.dataset.revision),start_word:startWord, end_word:endWord, hook_text:$('#hook-text').value, layout:selectedLayout(), dead_air:$('#dead-air').checked, zoom:$('#zoom').checked, ...extra}));
   };
+  // Toggling re-renders only this clip's selected preview, like a trim.
+  for (const id of ['#dead-air', '#zoom']) $(id).addEventListener('change', async () => { try { await edit({}); } catch (error) { notice(error.message, true); } });
   const changeMode = mode => { trimMode = mode; $('#in-mode').classList.toggle('selected', mode === 'in'); $('#out-mode').classList.toggle('selected', mode === 'out'); };
   $('#in-mode').addEventListener('click', () => changeMode('in'));
   $('#out-mode').addEventListener('click', () => changeMode('out'));

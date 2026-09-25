@@ -138,3 +138,17 @@ def estimated_cost_usd(model: str, input_tokens: int, output_tokens: int) -> flo
 
 # Installed macOS system font used by libass.
 CAPTION_FONT = os.getenv("MACLIPS_CAPTION_FONT", "Helvetica")
+
+# --------------------------------------------------------------------------- #
+# Retention pacing in S8/S12 (session 2026-09-25c; PLAN.md §4.4 item 8)
+# --------------------------------------------------------------------------- #
+DEAD_AIR_GAP_S = 0.8      # cut an inter-word silence longer than this
+DEAD_AIR_PAD_S = 0.12     # speech-side margin kept on each side of a cut
+DEAD_AIR_XFADE_S = 0.025  # audio crossfade at each join, against clicks
+ZOOM_FACTOR = 1.15        # punch-in scale for face-centred and centre crops
+ZOOM_MIN_HOLD_S = 3.0     # every framing holds this long: at most one switch per 3 s [I]
+ZOOM_PAUSE_S = 1.5        # pause that triggers a zoom when dead-air removal is off
+
+# Where S8 writes previews inside a source workdir. A session can point new
+# renders at a fresh folder so earlier previews stay for comparison.
+PREVIEW_DIR = os.getenv("MACLIPS_PREVIEW_DIR", "previews")

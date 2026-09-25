@@ -24,7 +24,7 @@ def proxy_render(ctx):
         cid = str(candidate['rank'])
         previews[cid] = {}
         for name, layout in ctx.output('S7')['plans'][cid].items():
-            path = ctx.workdir / 'previews' / f'{cid}-{name}.mp4'
+            path = ctx.workdir / config.PREVIEW_DIR / f'{cid}-{name}.mp4'
             try:
                 result = render_clip(Path(media['video_path']), Path(media['audio_path']),
                                      candidate, words, layout, path, proxy=True)
@@ -40,8 +40,15 @@ def proxy_render(ctx):
 
 def final_render(ctx):
     from .render import RenderError, render_clip
+    from .ranking import DEFAULT_MAX_DURATION_S, DEFAULT_MIN_DURATION_S
     media = ctx.output('S6')
     rendered = []
+    # S11 checks the source span; dead-air removal shortens the clip, so the
+    # edited duration is gated against the same brief range before encoding.
+    brief = ctx.outputs.get('S1', {}).get('brief') or {}
+    low, high = brief.get('min_duration_s'), brief.get('max_duration_s')
+    allowed = (DEFAULT_MIN_DURATION_S if low is None else float(low),
+               DEFAULT_MAX_DURATION_S if high is None else float(high))
     for clip in ctx.output('S9')['approved']:
         cid = str(clip['rank'])
         name = clip['layout']
@@ -51,7 +58,8 @@ def final_render(ctx):
         try:
             result = render_clip(Path(media['video_path']), Path(media['audio_path']),
                                  clip, ctx.output('S3')['words'], plans[name],
-                                 ctx.workdir / 'finals' / f'{cid}.mp4', proxy=False)
+                                 ctx.workdir / 'finals' / f'{cid}.mp4', proxy=False,
+                                 duration_range=allowed)
         except RenderError as exc:
             raise GateFailure('S12', str(exc)) from exc
         rendered.append({**clip, **result})

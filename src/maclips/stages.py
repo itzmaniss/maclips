@@ -447,10 +447,25 @@ def s6_visual_analysis(ctx: RunContext) -> StageOutput:
 
 
 def s7_attribution(ctx: RunContext) -> StageOutput:
-    """Static per-shot layouts only; speaker attribution remains deferred."""
-    from .layouts import plan_layouts
-    return {"plans":plan_layouts(ctx.output("S6")["analysis"]),
-            "follow_crop_blocked":[c["rank"] for c in ctx.output("S5")["candidates"]]}
+    """Static per-shot layouts only; speaker attribution remains deferred.
+
+    Every plan also carries `speaker_changes`, the punch-in zoom's speaker
+    trigger: times where S4's window label changes between words. S3's
+    checkpointed words carry no labels, so they are re-derived from the turns
+    S4 checkpoints. No face is attributed to a speaker.
+    """
+    from .layouts import plan_layouts, speaker_changes
+    plans = plan_layouts(ctx.output("S6")["analysis"])
+    windows = ctx.outputs.get("S4", {}).get("windows") or []
+    words = ctx.output("S3")["words"]
+    for c in ctx.output("S5")["candidates"]:
+        window = next((w for w in windows if abs(w["start"] - c["start"]) < 1e-6
+                       and abs(w["end"] - c["end"]) < 1e-6), None)
+        changes = speaker_changes(words, window["turns"]) if window else []
+        for plan in plans.get(str(c["rank"]), {}).values():
+            plan["speaker_changes"] = changes
+    return {"plans": plans,
+            "follow_crop_blocked": [c["rank"] for c in ctx.output("S5")["candidates"]]}
 
 
 # --------------------------------------------------------------------------- #
@@ -544,10 +559,12 @@ STAGES: tuple[StageSpec, ...] = (
               needs=("S4",), version=3,
               gate="Video stream did not finish downloading; candidate with no face track is letterbox-only"),
     StageSpec("S7", "attribution", "Static shot layouts; attribution deferred", s7_attribution,
-              needs=("S6",), version=3,
+              # v4: face y/box and speaker_changes for the punch-in zoom (2026-09-25c).
+              needs=("S6", "S4"), version=4,
               gate="Low attribution confidence blocks follow-crop for that clip"),
     StageSpec("S8", "proxy-render", "540x960 videotoolbox previews", s8_proxy_render,
-              needs=("S7",), version=3, gate="Posted clips cannot be regenerated"),
+              # v4: dead-air removal and punch-in zoom in the render (2026-09-25c).
+              needs=("S7",), version=4, gate="Posted clips cannot be regenerated"),
     StageSpec("S9", "review", "Human selection and trimming", s9_review,
               needs=("S8",), params=("approvals",), gate="Human gate by definition"),
     StageSpec("S10", "commentary", "Resolve commentary text", s10_commentary,
@@ -556,8 +573,9 @@ STAGES: tuple[StageSpec, ...] = (
               needs=("S10",), version=2,
               gate="Any mechanical failure blocks the clip"),
     StageSpec("S12", "final-render", "One-pass 1080x1920 libx264 encode", s12_final_render,
-              needs=("S11",), version=2,
-              gate="Duration drift > 0.1s; wrong resolution; no audio stream"),
+              needs=("S11",), version=3,  # v3: edited (post-cut) duration, 2026-09-25c
+              gate="Edited duration outside the brief's range; duration drift > 0.1s "
+                   "against the edited plan; wrong resolution; no audio stream"),
     StageSpec("S13", "export-bundle", "MP4 + caption.txt + checklist.md", s13_export_bundle,
               needs=("S12",), version=2, gate=""),
     StageSpec("S14", "post-track", "Log the post URL and disclosure", s14_post_track,

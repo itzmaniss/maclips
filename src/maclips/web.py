@@ -212,6 +212,10 @@ def edit_clip(cid,payload):
     a,b=words[start].get('start'),words[end].get('end')
     if a is None or b is None or b<=a: raise ValueError('selected boundaries have no usable aligned timing')
     data.update(start_word=start,end_word=end,start=a,end=b,duration=b-a,hook_text=str(payload.get('hook_text',data.get('hook_text',''))))
+    for toggle in ('dead_air','zoom'):
+        if toggle in payload:
+            if not isinstance(payload[toggle],bool): raise ValueError(f'{toggle} must be true or false')
+            data[toggle]=payload[toggle]
     layout=payload.get('layout') or data.get('layout') or next(iter(data['previews']))
     plans=state['plans'][str(data['rank'])]
     if layout not in plans: raise ValueError('layout unavailable')
@@ -220,11 +224,17 @@ def edit_clip(cid,payload):
         from .vision import analyze_window
         from .layouts import plan_layouts
         analysis=analyze_window(state['video'],a,b,Path(state['workdir'])/'face-checks'/f"{data['rank']}-edit-{data.get('revision',0)+1}")
+        changes=next(iter(state['plans'][str(data['rank'])].values()),{}).get('speaker_changes',[])
         plans=plan_layouts({str(data['rank']):analysis})[str(data['rank'])]
+        for plan in plans.values(): plan['speaker_changes']=changes
         if layout not in plans:
             raise ValueError('new span has different face availability; choose letterbox and retry')
         state['plans'][str(data['rank'])]=plans
-    path=Path(state['workdir'])/'previews'/f"{data['rank']}-{layout}.mp4"
+    # Re-render next to the clip's current preview, so an edit never overwrites
+    # an older preview folder kept for comparison.
+    current=next((p['path'] for p in data.get('previews',{}).values() if p.get('path')),None)
+    folder=Path(current).parent if current else Path(state['workdir'])/config.PREVIEW_DIR
+    path=folder/f"{data['rank']}-{layout}.mp4"
     result=render_clip(Path(state['video']),Path(state['audio']),data,words,plans[layout],path,proxy=True)
     # Other layouts now refer to stale boundaries; they are regenerated on demand.
     data['previews']={layout:result};data['layout']=layout;data['revision']=data.get('revision',0)+1
