@@ -165,7 +165,8 @@ def run_source(payload,from_stage=None):
     args=argparse.Namespace(source=payload['source'],max_height=1440,clip_class=payload['clip_class'],
        from_stage=from_stage,expected_speakers=payload.get('expected_speakers'),language=payload.get('language') or None,
        candidates=int(payload.get('candidates') or 12),full_diarization=False,brief=brief,campaign_id=campaign_id,
-       clip_min_duration=payload.get('min_duration_s'),clip_max_duration=payload.get('max_duration_s'),on_stage=None)
+       clip_min_duration=payload.get('min_duration_s'),clip_max_duration=payload.get('max_duration_s'),
+       length_preset=payload.get('length_preset') or 'default',on_stage=None)
     status=_cmd_run(args)
     if status: raise ValueError('Pipeline stopped; see the source stage status and gate reason.')
     return {'status':'complete'}
@@ -180,6 +181,8 @@ async def ingest(request:Request):
     if not 5<=count<=30: raise ValueError('candidate count must be 5–30')
     low=float(payload.get('min_duration_s') or 10); high=float(payload.get('max_duration_s') or 180)
     if not 0<low<=high: raise ValueError('invalid clip duration range')
+    from .ranking import LENGTH_PRESETS
+    if (payload.get('length_preset') or 'default') not in LENGTH_PRESETS: raise ValueError('unknown length preset')
     speakers=payload.get('expected_speakers')
     if speakers is not None and (not isinstance(speakers,int) or speakers<1): raise ValueError('invalid expected speaker count')
     return job(run_source,payload)
@@ -196,7 +199,9 @@ async def rerun(sid:int,request:Request):
     cfg=state['config']
     return job(run_source,{'source':state.get('origin') or source['path'],'clip_class':source['clip_class'],
         'campaign_id':source['campaign_id'],'language':cfg.get('expected_language'),'expected_speakers':cfg.get('expected_speaker_count'),
-        'candidates':cfg.get('candidate_count',12)},stage)
+        'candidates':cfg.get('candidate_count',12),
+        # The resolved range (preset or explicit) reruns unchanged, so S5 stays cached.
+        'min_duration_s':cfg.get('clip_min_duration'),'max_duration_s':cfg.get('clip_max_duration')},stage)
 
 
 def edit_clip(cid,payload):

@@ -263,6 +263,27 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
+def clip_duration_config(args: argparse.Namespace, brief: dict) -> tuple[float | None, float | None]:
+    """S5's `clip_min_duration` / `clip_max_duration` config values.
+
+    Precedence: the brief (S5 applies it itself), then explicit flags, then the
+    length preset. The preset applies only when the brief states neither
+    duration, so it can never combine with a brief bound into an inverted
+    range [I]. `default` returns None for both, which leaves S5's cache key
+    exactly as it was before presets existed.
+    """
+    from .ranking import LENGTH_PRESETS
+
+    low, high = getattr(args, "clip_min_duration", None), getattr(args, "clip_max_duration", None)
+    preset = getattr(args, "length_preset", None) or "default"
+    if preset not in LENGTH_PRESETS:
+        raise ValueError(f"unknown length preset {preset!r}; choose {', '.join(LENGTH_PRESETS)}")
+    if preset == "default" or brief.get("min_duration_s") or brief.get("max_duration_s"):
+        return low, high
+    preset_low, preset_high = LENGTH_PRESETS[preset]
+    return (preset_low if low is None else low), (preset_high if high is None else high)
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     try:
         check_environment()
@@ -314,6 +335,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if isinstance(brief,str):
         brief=json.loads(Path(brief).read_text())
     campaign_id=getattr(args,"campaign_id",None)
+    try:
+        clip_min, clip_max = clip_duration_config(args, brief)
+    except ValueError as exc:
+        print(f"FAILED: {exc}", file=sys.stderr)
+        return 1
     with db.connect(config.DB_PATH) as conn:
         sid=db.register_source(conn,source_hash,source,args.clip_class,campaign_id)
         saved=conn.execute("SELECT state_json FROM sources WHERE id=?",(sid,)).fetchone()
@@ -335,8 +361,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         config={
             "clip_class": args.clip_class,
             "brief": brief, "campaign_id": campaign_id, "approvals": approvals,
-            "clip_min_duration": getattr(args,"clip_min_duration",None),
-            "clip_max_duration": getattr(args,"clip_max_duration",None),
+            "clip_min_duration": clip_min,
+            "clip_max_duration": clip_max,
             "expected_speaker_count": args.expected_speakers,
             "expected_language": args.language,
             "candidate_count": args.candidates,
@@ -417,6 +443,10 @@ def main() -> int:
     run.add_argument("--brief", default=None, help="human-confirmed campaign JSON file")
     run.add_argument("--clip-min-duration",type=float,default=None)
     run.add_argument("--clip-max-duration",type=float,default=None)
+    run.add_argument("--length-preset", default="default", choices=["default", "shorts-dense"],
+                     help="S5 duration range when the brief states none: default 10-180 s, "
+                          "shorts-dense 22-45 s. Explicit --clip-*-duration flags and the "
+                          "brief's own durations take precedence")
     run.add_argument("--full-diarization", action="store_true",
                      help="diarize the whole source instead of candidate windows. "
                           "Slow (9m per 2h, measured) and not the default; kept for "

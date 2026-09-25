@@ -2158,6 +2158,22 @@ Whop's brand-side form has a free-text Requirements field covering quality stand
 - `min_duration_s`, `max_duration_s`. When the brief states neither, S5 uses
   10–180 s, the range postable on all three platforms (§6.1). Each field
   overrides its own end of the range.
+  **Length preset (session 2026-09-25c).** A run-level `--length-preset` flag
+  (and the Ingest dropdown) sets that range only when the brief states neither
+  duration: `default` is 10–180 s and `shorts-dense` is 22–45 s. The 22–45 s
+  figure is **[U]**: it comes from the user's retention research, which cites a
+  vendor source. Explicit `--clip-min/max-duration` values override the preset.
+  A brief that states either duration switches the preset off [I], so a brief
+  bound can never combine with a preset bound into an inverted range. Only the
+  prompt's numbers change; the wording is byte-identical (tested). `default`
+  leaves S5's cache key unchanged.
+  *Real check [V], one Sonnet call, $0.0447:* video 2 with `--from S5
+  --length-preset shorts-dense` kept **3 of 12** candidates, so the
+  ≥ 5-survivor gate stopped the run. Returned durations: 61.9, 24.6, 47.9,
+  37.7, 60.9, 51.4, 55.1, 64.9, 24.8, 61.0, 53.8 and 47.9 s. Nine were above
+  45 s, although the prompt asked for 22–45 s. Nothing was changed; this is
+  information for the user. Video 2's S5 checkpoint and DB state were restored
+  (`work/session-20260925c/preset-rank/`).
 - `required_tags` (accounts to tag), `required_hashtags`, `required_phrases`.
 - `disclosure_text` (default: the paid-promotion tag you settled on).
 - `forbidden_topics`, `forbidden_edits` (e.g. "no text over face", "no added music").

@@ -25,6 +25,14 @@ MIN_SURVIVING_CANDIDATES = 5
 DEFAULT_MIN_DURATION_S = 10.0
 DEFAULT_MAX_DURATION_S = 180.0
 
+# Run-level S5 duration presets, used only when the brief states no duration.
+# `shorts-dense` comes from the user's retention research, which cites a vendor
+# source [U]; `default` is today's range. Only the numbers change, never PROMPT.
+LENGTH_PRESETS = {
+    "default": (DEFAULT_MIN_DURATION_S, DEFAULT_MAX_DURATION_S),
+    "shorts-dense": (22.0, 45.0),
+}
+
 
 class RankingError(RuntimeError):
     """The model's output could not be used, after the one permitted retry."""
