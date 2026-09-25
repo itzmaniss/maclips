@@ -840,6 +840,19 @@ This approach uses only clean components (Apple Vision, pyannote community-1, yo
    - In side-by-side and split-screen shots, the speaker stays at full brightness and the other person is slightly dimmed.
    - It needs turn attribution (items 3–4), so it sits behind the same S7 confidence gate as follow-crop. Dimming the wrong person is worse than no dimming.
 7. **Speaker with no face track** (off-screen or looking away). Hold the previous segment. If that runs longer than ~3 s, fall back to split-screen or letterbox for that span.
+8. **Pacing: dead-air removal and punch-in zoom (session 2026-09-25c; user decision, built).** Both are per clip, default on, with toggles in Review. They stay in S8/S12's single `filter_complex` pass (`pacing.py`, `render.py`).
+   - **Dead air.** Cut every inter-word silence longer than 0.8 s (`config.DEAD_AIR_GAP_S`), keeping 0.12 s of pad on each side. Cuts are hard jump cuts.
+     - Keep boundaries snap to half-frame points, so each keep has whole frames and joins add no A/V drift.
+     - Audio keeps are joined with a 25 ms `acrossfade`. Its overlap comes out of the cut, so the audio length equals the edited duration.
+     - Captions, layout segments and the hook are mapped onto the edited timeline; the hook shows for the first 3 s of *edited* time [I].
+     - S8/S12's planned duration is the edited one. S12 also gates the edited duration against the brief's range, because S11 checks the source span.
+   - **Punch-in zoom.** A hard cut between normal framing and 1.15×.
+     - Triggers: joins, changes in S4's per-window speaker label, and, with dead-air removal off, pauses over 1.5 s.
+     - **Rate limit [I]:** every framing, first and last included, holds for ≥ 3 s.
+     - It applies to face-centred and centre crops only. Split panels (already tight) and letterbox are never zoomed [I].
+     - The zoomed crop scales the full-height crop by 1/1.15 about the face centre and is clamped to the frame.
+     - **Hard rule:** a face-centred shot zooms only when its whole Vision face box fits in the zoomed crop. Close-ups whose face box is wider than the crop keep normal framing. This was added after the first real run clipped 11 of video 3's 28 close-up segments by up to 25 px.
+   - Speaker changes need no face attribution. S3's checkpointed words carry no labels [V], so S7 re-labels each window's words from S4's checkpointed turns with `assign_speakers` and stores the change times on every plan.
 
 **Known failure modes, and what catches them**
 
@@ -1705,6 +1718,7 @@ A local web app served from the Mac: a Python backend in the same process as the
   - Click a word to set in or out. Edits snap to word boundaries.
   - Edits re-render only that preview.
 - **Hook text:** editable inline.
+- **Pacing toggles:** "Remove dead air" and "Punch-in zoom" (§4.4 item 8), both on by default. Toggling re-renders only that preview, as a trim does. The bar shows the edited length against the source span, the number of cuts and the number of zoom switches.
 - **Right: brief panel.** The brief's rules as a checklist, with mechanical items pre-evaluated.
 - **Actions:**
   - **Approve** opens the commentary control: Write / Auto-generate / None.
@@ -2059,6 +2073,68 @@ checkpoints are in `work/session-20260925b/old-checkpoints/`.
 
 Whether any of the layouts is right is still the user's call.
 
+**Session 2026-09-25c, dead-air removal and punch-in zoom (§4.4 item 8) [V].**
+S7/S8 were re-run on all three sources through the real CLI with no model
+call. A wrapper removed the API key, made `litellm.completion` raise, and
+required every stage before S7 to hit its checkpoint.
+- **Videos 2 and 3:** `maclips run <url> --clip-class general-own --language en --candidates 12 --from S7`.
+- **Benchmark:** `maclips render-review …/benchmark-face-manifest.json --diagnostic-finals 2`.
+  This path has no `--from`; the S7/S8 version bump alone forced the recompute, which exercises the stale-cache fix.
+- New previews are in `…/previews-pacing/` (`MACLIPS_PREVIEW_DIR`); the old
+  `previews/` is untouched.
+- Old S7/S8 checkpoints, the benchmark receipt and the DB are in
+  `work/session-20260925c/`. The old benchmark diagnostics are in
+  `diagnostic-before-pacing/`.
+
+| Source | S8 wall (before → after) | Cuts | Dead air removed per clip (min / median / max) | Visible zoom switches |
+|---|---:|---:|---|---:|
+| Benchmark (24 previews) | 137.30 s → 122.83 s | 156 | 1.22 / 16.41 / 28.59 s | 91 (max 12 per clip) |
+| Video 2 (22) | 56.74 s → 57.31 s | 1 | 0.00 / 0.00 / 1.15 s | 14 (max 4) |
+| Video 3 (24) | 191.87 s → 181.01 s | 132 | 4.39 / 8.72 / 21.98 s | 37 (max 11) |
+
+Clip length before → after, in seconds (primary layout):
+- **Benchmark:** 83.8→61.0, 85.3→68.7, 75.5→59.3, 88.9→71.8, 90.6→77.9,
+  73.1→58.0, 94.4→65.8, 14.3→13.1, 73.8→65.9, 148.5→129.8, 41.6→31.6,
+  87.4→70.6.
+- **Video 2:** 10 of 11 clips have no gap above 0.8 s. Candidate 11 goes
+  64.0→62.9.
+- **Video 3:** 86.1→79.6, 93.3→85.5, 132.6→116.5, 75.3→69.5, 44.8→40.4,
+  76.2→62.8, 66.4→61.3, 38.8→33.9, 115.2→100.0, 107.3→94.7, 119.3→97.3,
+  81.1→71.4.
+
+Every preview passed the 0.1 s gate against its *edited* plan. Video
+streams equal the plan exactly (whole frames); for example, video 3
+candidate 1 is 3,978 frames at 50 fps = 79.560 s.
+
+Checks on the real output (`work/session-20260925c/check_pacing.py`, `pacing-check.{log,json}`):
+- **Face after each join and each visible zoom switch** (Apple Vision on the frame 0.1 s later; split pieces checked per panel):
+  - benchmark 244/247;
+  - video 2 15/15;
+  - video 3 169/169.
+
+  The three benchmark misses are a profile view (candidate 9 at 4.83 s, counted
+  twice) and one split panel (candidate 2 at 33.83 s). In both, the person is
+  visibly in frame (`noface-compare.png`).
+- **Zoom geometry:** the zoomed crop contains the face box on every segment that zooms: 61/61 on the benchmark and 55/55 on video 2. On video 3, 11 of 28 close-up segments had face boxes wider than the 526 px crop (by up to 25 px). The fit rule in §4.4 item 8 was added, and video 3 was re-rendered. Those shots now keep normal framing.
+- **Audio joins:** 289 joins. The largest sample-to-sample step within ±5 ms of any join is 0.283 FS, and no join exceeds its own clip's 99.9th-percentile step (max ratio 0.89). The flag threshold, max(0.05 FS, 2 × p99.9), flagged 0.
+- **Audio sync:** output audio after each join was cross-correlated with the source at the keep start. Decoding both continuously gave 246/246 joins (keeps ≥ 1 s) at **0.0 ms** lag. A first pass that seeked into the AAC output showed 1–47 ms offsets in multiples of 64 samples. That was a seek artifact of the measurement, not of the render.
+- **Diagnostic finals** (benchmark candidates 1 and 2, split, watermarked, unapproved, not exported):
+  - planned 61.042 / 68.667 s;
+  - ffprobe format 61.100 / 68.700 s, video streams 61.042 / 68.667 s;
+  - 1080×1920 with audio;
+  - wall 15.49 / 19.85 s.
+
+**Upscale (output height / crop height).**
+- The zoomed face-centred crop is 526×938 on 1080p sources: 2.05× at final
+  resolution against 1.78× unzoomed, and 1.02× in the preview.
+- On the 1280-high benchmark it is 624×1112: 1.73× against 1.50×.
+- Split panels are never zoomed; their worst case stays 1.17×.
+
+**Not verified.** Whether the jump cuts and the punch-in read well is the
+user's judgement. Silences can hold laughter or reactions, which the transcript
+does not show, and those are cut too [I]. The benchmark path has no S4 turns,
+so its zooms come from joins only.
+
 ## 7. Campaign workflow
 
 ### 7.1 Lifecycle
@@ -2162,6 +2238,12 @@ the previews, also pending.
 Captions now stay on screen continuously, and split panels no longer overlap.
 All three sources were re-rendered and checked by machine (§6.5). Step 5/6
 acceptance is still pending the user's judgement of the new previews.
+
+**Session 2026-09-25c status [V]:** step-5 render gains dead-air removal and
+punch-in zoom (§4.4 item 8), rendered on all three sources through the real
+CLI (§6.5). Stale-cache defect fixed by bumping S7 3→4, S8 3→4 and S12 2→3.
+Cache keys still hash versions, not code, so any change to a stage's output
+must bump its version.
 
 **Critical path to first earnings:** 1 → 2 → 4 → 5 → 6, with 3 and 8 in parallel.
 

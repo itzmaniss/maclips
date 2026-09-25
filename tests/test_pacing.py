@@ -181,6 +181,17 @@ def test_zoom_switch_splits_a_face_segment_into_normal_and_zoomed_crops(tmp_path
     assert "[1:a]atrim=duration=12.000000" in graph and "concat=n=2" in graph
 
 
+def test_close_up_wider_than_zoomed_crop_keeps_normal_framing(tmp_path, monkeypatch):
+    # Video 3's selfie shots: a 540 px face box does not fit the 526 px zoomed crop.
+    source, commands, _ = fake_ffmpeg(monkeypatch, tmp_path, lambda cmd: 12.0)
+    speech = [w(str(i), 20 + i * .5, 20 + i * .5 + .4) for i in range(24)]
+    plan = {"kind": "face-centred", "speaker_changes": [24.0], "segments": [
+        {"start": 20, "end": 32, "kind": "face-centred", "x": .5, "y": .55, "box": [.36, .31, .28, .5]}]}
+    result = render.render_clip(source, source, {"start": 20, "end": 32}, speech, plan, tmp_path / "c.mp4")
+    graph = commands[0][commands[0].index("-filter_complex") + 1]
+    assert "crop=526:938" not in graph and not any(p["zoomed"] for p in result["pacing"]["pieces"])
+
+
 def test_toggles_off_reproduce_todays_command(tmp_path, monkeypatch):
     source, commands, asses = fake_ffmpeg(monkeypatch, tmp_path)
     plan = {**PLAN, "speaker_changes": [11.0, 15.2]}

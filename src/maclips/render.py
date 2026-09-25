@@ -156,6 +156,19 @@ def _zoom_crop(cx: float, cy: float, width: int, height: int, zoom: float) -> st
     return f"crop={crop_width}:{crop_height}:{x}:{y}"
 
 
+def _zoom_fits(segment: dict, width: int, height: int) -> bool:
+    """Hard rule: a face-centred shot zooms only if its whole face box stays in
+    the zoomed crop. A close-up whose face is wider than the crop keeps normal
+    framing. Centre crops have no face box and always may zoom."""
+    if segment.get("kind") != "face-centred" or not segment.get("box"):
+        return True
+    bx, by, bw, bh = _box(segment["box"])
+    cw, ch, x, y = map(int, _zoom_crop(_number(segment.get("x", .5), "face centre"),
+                                       _number(segment.get("y", .4), "face centre"),
+                                       width, height, config.ZOOM_FACTOR)[5:].split(":"))
+    return x <= bx * width and (bx + bw) * width <= x + cw and y <= by * height and (by + bh) * height <= y + ch
+
+
 
 def clipped_segments(segments: list[dict], start: float, end: float) -> list[dict]:
     """Allow trimming inside a saved plan, but never leave a gap or overlap."""
@@ -292,6 +305,8 @@ def render_clip(video: Path, audio: Path, candidate: dict, words: list[dict],
             fps, origin = pacing["fps"], pacing["origin"]
             spans = [dict(s) for s in segments] if segments else [{**plan, "kind": kind, "start": start, "end": end}]
             spans[0]["start"], spans[-1]["end"] = min(spans[0]["start"], ss), max(spans[-1]["end"], keeps[-1][1])
+            for span in spans:
+                span["zoom_ok"] = _zoom_fits(span, width, height)
             pieces = video_pieces(keeps, spans, switches, lambda t: half_frame(t, fps, origin))
             vf = _piece_graph(pieces, ss, width, height, ow, oh)
         elif segments:

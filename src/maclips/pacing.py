@@ -137,7 +137,7 @@ def video_pieces(keeps, segments, switches, snap) -> list[list]:
                 continue
             mid = (x + y) / 2
             segment = next(s for s in segments if s["start"] <= mid < s["end"])
-            zoomed = segment["kind"] in ZOOMABLE and bisect.bisect_right(switches, offset + mid - a) % 2 == 1
+            zoomed = segment["kind"] in ZOOMABLE and segment.get("zoom_ok", True) and bisect.bisect_right(switches, offset + mid - a) % 2 == 1
             last = pieces[-1] if pieces else None
             if last and abs(last[1] - x) < 1e-9 and last[2] is segment and last[3] == zoomed:
                 last[1] = y
