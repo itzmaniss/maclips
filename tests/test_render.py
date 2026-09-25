@@ -96,8 +96,8 @@ def test_split_left_person_is_top_and_captions_at_seam(tmp_path, monkeypatch):
                        {"kind": "split", "boxes": [[.75,.2,.1,.2], [.1,.2,.1,.2]]},
                        tmp_path / "split.mp4", proxy=False)
     graph = commands[0][commands[0].index("-filter_complex")+1]
-    assert "[top]crop=1440:1280:0:0" in graph
-    assert "[bottom]crop=1440:1280:1120:0" in graph
+    assert "[top]crop=1216:1080:0:0" in graph
+    assert "[bottom]crop=1344:1194:1216:0" in graph
     assert "vstack=inputs=2" in graph
     assert "scale=1080:960" in graph
 
@@ -149,4 +149,73 @@ def test_caption_crossing_shot_cut_changes_position(tmp_path):
         {'start':10,'end':12,'kind':'letterbox'}, {'start':12,'end':14,'kind':'split'}])
     text=path.read_text()
     assert '0:00:01.00,0:00:02.00,Caption,,0,0,230,,' in text
-    assert '0:00:02.00,0:00:03.00,Caption,,0,0,880,,' in text
+    assert '0:00:02.00,0:00:04.00,Caption,,0,0,880,,' in text
+
+
+def caption_events(text):
+    import re
+    def t(s):
+        h, m, rest = s.split(':'); return int(h)*3600 + int(m)*60 + float(rest)
+    return sorted((t(a), t(b), margin, body) for a, b, margin, body in
+                  re.findall(r'^Dialogue: 0,([^,]+),([^,]+),Caption,,0,0,(\d+),,(.*)$', text, re.M))
+
+
+def test_captions_tile_gaps_and_long_pause_with_one_highlight(tmp_path):
+    words = [{'text': f'w{i}', 'start': s, 'end': s + .3}
+             for i, s in enumerate([10.2, 10.6, 11.0, 11.5, 12.0, 12.4, 13.0, 21.0, 21.5])]
+    words.append({'text': 'broken', 'start': 14, 'end': 13})
+    path = tmp_path / 'caption.ass'
+    render.write_ass(path, words, 10, 25, '', segments=[
+        {'start': 10, 'end': 16.05, 'kind': 'face-centred'}, {'start': 16.05, 'end': 25, 'kind': 'split'}])
+    events = caption_events(path.read_text())
+    assert events[0][0] == pytest.approx(.2) and events[-1][1] == pytest.approx(15)
+    for (a0, b0, *_), (a1, *_) in zip(events, events[1:]):
+        assert a1 == pytest.approx(b0)
+    assert all(body.count('{\\c&H00FFFF&}') == 1 for *_, body in events)
+    # The pause 13.3-21.0 is covered by w6 across the layout switch at 16.05.
+    pause = [e for e in events if 'w6' in e[3].split('{\\c&HFFFFFF&}')[0].split('}')[-1]]
+    assert [(a, b, m) for a, b, m, _ in pause] == [(3, 6.05, '230'), (6.05, 11, '880')]
+    assert '0:00:15.00,Caption' in path.read_text()
+
+
+def crop_rects(boxes, width, height):
+    return [tuple(int(v) for v in c[5:].split(':')) for c in render._split_crops(boxes, width, height)]
+
+
+def assert_split_geometry(boxes, width, height):
+    (w1, h1, x1, y1), (w2, h2, x2, y2) = rects = crop_rects(boxes, width, height)
+    assert x1 + w1 <= x2, "panels overlap horizontally"
+    for (w, h, x, y), (bx, by, bw, bh) in zip(rects, sorted(boxes, key=lambda b: b[0] + b[2]/2)):
+        assert 0 <= x and x + w <= width and 0 <= y and y + h <= height
+        assert abs(w / h - 1080/960) < .01
+        assert x <= bx*width and (bx+bw)*width <= x + w and y <= by*height and (by+bh)*height <= y + h
+    return rects
+
+
+def test_side_by_side_call_panels_hold_only_their_own_face():
+    # Video 3 candidate 1 shot 1: host left, guest right, 1920x1080.
+    boxes = [[0.1299, 0.1806, 0.2040, 0.3627], [0.6139, 0.2807, 0.2976, 0.5291]]
+    (w1, h1, x1, y1), (w2, h2, x2, y2) = assert_split_geometry(boxes, 1920, 1080)
+    assert x1 + w1 == x2 == 954
+    assert (x2 + w2) > (0.6139 + 0.2976) * 1920 and x1 + w1 < 0.6139 * 1920
+
+
+def test_benchmark_wide_shot_split_still_fits():
+    boxes = [[0.719, 0.381, 0.027, 0.054], [0.296, 0.383, 0.024, 0.047]]
+    (w1, h1, *_), (w2, h2, *_) = assert_split_geometry(boxes, 2560, 1280)
+    assert min(h1, h2) >= 1000
+
+
+@pytest.mark.parametrize("boxes", [
+    [[0, 0, .05, .1], [.95, .9, .05, .1]],
+    [[.02, .8, .2, .2], [.4, 0, .1, .1]],
+    [[.3, .45, .1, .1], [.55, .45, .1, .1]],
+])
+def test_split_crops_never_leave_frame(boxes):
+    assert_split_geometry(boxes, 1920, 1080)
+
+
+def test_stacked_or_touching_faces_are_not_split():
+    stacked = [[0.863, 0.812, 0.063, 0.112], [0.859, 0.476, 0.055, 0.099]]
+    with pytest.raises(render.RenderError, match="too close"):
+        render._split_crops(stacked, 1920, 1080)

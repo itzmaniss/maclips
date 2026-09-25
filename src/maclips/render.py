@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from . import config, ffmpeg
+from .layouts import split_divider
 
 
 class RenderError(RuntimeError):
@@ -71,8 +72,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             continue
         a, b = float(word["start"]), float(word["end"])
         if math.isfinite(a) and math.isfinite(b) and b > start and a < end and b > a:
-            visible.append((max(a, start) - start, min(b, end) - start,
-                            _text(word.get("text", word.get("word", "")))))
+            visible.append((max(a, start) - start, _text(word.get("text", word.get("word", "")))))
+    visible.sort(key=lambda item: item[0])
+    # Each word holds until the next word starts, and the last until clip end,
+    # so the caption never blinks off between words or across pauses.
+    visible = [(a, b, w) for (a, w), b in zip(visible, [a for a, _ in visible[1:]] + [end - start])]
     for offset in range(0, len(visible), 6):
         phrase = visible[offset:offset + 6]
         for selected, (a, b, _) in enumerate(phrase):
@@ -92,17 +96,43 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     path.write_text("".join(lines))
 
 
-def _centre(box: object) -> float:
+def _box(box: object) -> tuple[float, float, float, float]:
     if not isinstance(box, (list, tuple)) or len(box) != 4:
         raise RenderError("split layout requires two normalised face boxes")
     x, y, width, height = [_number(v, "face box") for v in box]
     if min(x, y) < 0 or min(width, height) <= 0 or x + width > 1.00001 or y + height > 1.00001:
         raise RenderError("face box lies outside source")
-    return x + width / 2
+    return x, y, width, height
+
+
+SPLIT_FACE_Y = 0.4  # face centre this far down its panel ("upper-middle") [I]
+
+
+def _split_crops(boxes: object, width: int, height: int) -> list[str]:
+    """Left-in-source face first. The two crops never overlap horizontally.
+
+    Each crop is as wide as its side of the divider allows (capped by full
+    height at 1080:960), placed on its face and clamped to its side and frame.
+    """
+    if not isinstance(boxes, list) or len(boxes) != 2:
+        raise RenderError("split layout requires exactly two face boxes")
+    faces = sorted((_box(box) for box in boxes), key=lambda b: b[0] + b[2] / 2)
+    divider = split_divider(faces)
+    if divider is None:
+        raise RenderError("split faces are too close for non-overlapping panels")
+    divider = int(divider * width) // 2 * 2
+    crops = []
+    for (x, y, w, h), low, high in ((faces[0], 0, divider), (faces[1], divider, width)):
+        crop_width = min(high - low, int(height * 1080 / 960)) // 2 * 2
+        crop_height = min(height, int(crop_width * 960 / 1080)) // 2 * 2
+        left = max(low, min(high - crop_width, round((x + w / 2) * width - crop_width / 2))) // 2 * 2
+        top = max(0, min(height - crop_height, round((y + h / 2) * height - SPLIT_FACE_Y * crop_height))) // 2 * 2
+        crops.append(f"crop={crop_width}:{crop_height}:{left}:{top}")
+    return crops
 
 
 def _crop(cx: float, aspect: float, width: int, height: int) -> str:
-    # Full source height is preserved. Clamp horizontal crop to source bounds.
+    # Face-centred/centre only: full source height, horizontal clamp to source.
     crop_width = min(width, int(height * aspect) // 2 * 2)
     x = max(0, min(width - crop_width, round(cx * width - crop_width / 2))) // 2 * 2
     return f"crop={crop_width}:{height}:{x}:0"
@@ -147,13 +177,10 @@ def _segment_graph(segments: list[dict], start: float, width: int, height: int,
         if kind == "letterbox":
             graph += f",scale={ow}:{oh}:force_original_aspect_ratio=decrease,pad={ow}:{oh}:(ow-iw)/2:(oh-ih)/2:black"
         elif kind == "split":
-            boxes = segment.get("boxes", [])
-            if len(boxes) != 2:
-                raise RenderError("split layout requires exactly two face boxes")
-            centres = sorted(_centre(box) for box in boxes)
+            top, bottom = _split_crops(segment.get("boxes"), width, height)
             graph += f",split=2[top{i}][bottom{i}];"
-            graph += f"[top{i}]{_crop(centres[0],1080/960,width,height)},scale={ow}:{oh//2}[t{i}];"
-            graph += f"[bottom{i}]{_crop(centres[1],1080/960,width,height)},scale={ow}:{oh//2}[b{i}];[t{i}][b{i}]vstack=inputs=2"
+            graph += f"[top{i}]{top},scale={ow}:{oh//2}[t{i}];"
+            graph += f"[bottom{i}]{bottom},scale={ow}:{oh//2}[b{i}];[t{i}][b{i}]vstack=inputs=2"
         else:
             cx = _number(segment.get("x", .5), "face centre") if kind == "face-centred" else .5
             if not 0 <= cx <= 1:
@@ -194,13 +221,10 @@ def render_clip(video: Path, audio: Path, candidate: dict, words: list[dict],
         elif kind == "letterbox":
             vf = base + f",scale={ow}:{oh}:force_original_aspect_ratio=decrease,pad={ow}:{oh}:(ow-iw)/2:(oh-ih)/2:black"
         elif kind == "split":
-            boxes = plan.get("boxes", [])
-            if len(boxes) != 2:
-                raise RenderError("split layout requires exactly two face boxes")
-            centres = sorted(_centre(box) for box in boxes)
+            top, bottom = _split_crops(plan.get("boxes"), width, height)
             vf = base + ",split=2[top][bottom];"
-            vf += f"[top]{_crop(centres[0], 1080/960, width, height)},scale={ow}:{oh//2}[t];"
-            vf += f"[bottom]{_crop(centres[1], 1080/960, width, height)},scale={ow}:{oh//2}[b];[t][b]vstack=inputs=2"
+            vf += f"[top]{top},scale={ow}:{oh//2}[t];"
+            vf += f"[bottom]{bottom},scale={ow}:{oh//2}[b];[t][b]vstack=inputs=2"
         else:
             cx = _number(plan.get("x", 0.5), "face centre") if kind == "face-centred" else 0.5
             if not 0 <= cx <= 1:

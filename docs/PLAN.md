@@ -825,8 +825,14 @@ This approach uses only clean components (Apple Vision, pyannote community-1, yo
    - If the face drifts outside a dead-zone, the segment splits.
    - Static crops per segment render as ffmpeg `trim`+`crop`+`concat` in one pass. No per-frame crop expressions are needed.
 6. **Layout plan: split-screen.**
-   - Rendered whenever two tracks exist.
+   - Rendered whenever two tracks coexist in a shot **and** are far enough apart horizontally (below).
    - Two 1080×960 panels, each a crop around one face.
+   - **Crop rule (session 2026-09-25b, after the user rejected full-height crops):**
+     - The two crops never overlap horizontally. They meet at the midpoint between the face centres.
+     - Each crop is as wide as its side of that divider allows, capped at full height × 1080/960. Its height comes from the 1080:960 aspect.
+     - Each crop is centred on its face horizontally, with the face centre 40% down the panel ("upper-middle") [I]. It is clamped to its side of the divider and to the frame.
+     - **Too close [I]:** each face box, plus a quarter face-width of margin, must lie on its own side of the divider. Otherwise the planner uses face-centred on the longer track for that shot. This includes faces stacked in one column, such as webcam insets in a screen share.
+     - No upscale gate. The factor (960 / crop height) is reported in §6.5.
    - The left-in-source person goes on top, consistently.
    - Captions sit at the seam.
    - Split-screen needs pieces 1 and 3 but **not** piece 2, which is why it is the safe fallback.
@@ -1772,6 +1778,9 @@ at -14 LUFS. Final encoding is libx264 CRF 18, preview videotoolbox.
   arbitrary face one-third down is incompatible without changing the crop
   height or adding padding [V, geometry]. Full height takes priority [I];
   the user should judge the resulting framing in step 6.
+  **Superseded for split panels on 2026-09-25b.** The user rejected the
+  duplicated panels, and split crops are no longer full height (§4.4 item 6).
+  Face-centred crops are still full height.
 
 **Phase 2 [V].** S11 now checks duration, platform, required tags/hashtags,
 caption disclosure, class/account routing (including no YPP), campaign CTA and
@@ -1910,6 +1919,76 @@ dropped for duration. Retained tracks per shot, in shot order:
   `work/7f8b3b5213024774/previews/` (video 3). Check images with face
   rectangles and shot indices are in `…/face-checks/<candidate>/` in the
   same workdirs. Summaries are in `work/session-20260925a/v{2,3}-summary.json`.
+
+**Session 2026-09-25b, caption flicker and split duplication (phase 1) [V].**
+The user reviewed the step-5/6 previews and reported two defects: captions
+that flicker on and off, and split panels on the Lovable (video 3) clips that
+duplicate the same person.
+
+*Captions, diagnosis confirmed [V].* Each word's ASS event ran from its
+`start` to its `end`, so nothing was on screen between words.
+For video 3 candidate 1 (86.09 s), the pre-fix ASS had 221 Caption events and
+**220 gaps totalling 35.15 s**. The caption was visible for only 50.94 s of
+86.09 s. The longest gap was 1.34 s.
+New rule: each word's event lasts until the next visible word starts. The last
+word lasts until the clip ends. Phrases, highlight colour, style and font are
+unchanged, and per-shot margins still switch at segment boundaries. The same
+clip after the fix: 224 events, **0 gaps, 0 overlaps, 86.09 s of 86.09 s
+covered**. A test covers gaps, a 7.7 s pause, a layout switch inside the
+pause, and exactly one highlighted word per event.
+
+*Split, diagnosis confirmed but incomplete [V].* Two cases produced the
+duplication.
+1. **Side-by-side call** (video 3 candidate 1, shot 1; face centres at
+   445 px and 1,464 px of 1,920). The pre-fix crops were `1214:1080` at
+   x=0 and x=706, an overlap of **508 px**. Each panel showed a strip of the
+   other person's tile (`work/session-20260925b/before-c1-split-55s.png`).
+2. **Webcam insets stacked in one column** during the Lovable screen share
+   (video 3 candidates 2, 3 and 4; 7 split segments). The two boxes sit at the
+   same x≈0.86, at y≈0.47 and y≈0.81. Both crops came out as
+   `crop=1214:1080:706:0`, so the two panels were **pixel-identical**
+   (`before-v3c2-split-30s.png`). This is most likely the "1 at top, 1 at
+   bottom" the user described. The lead's diagnosis covered only case 1.
+
+The new crop rule is in §4.4 item 6. Case 2 no longer splits: those shots
+become face-centred at x≈0.89. That 9:16 column holds both insets once, plus a
+strip of the screen share [I; the user should judge].
+Crops after the fix (source 1920×1080 unless stated; upscale = 960 / crop height):
+
+| Source | Split segments | Crop heights (px) | Upscale range |
+|---|---:|---|---|
+| Benchmark (2560×1280) | 3 | 1,056–1,216 | 0.79–0.91 (downscale) |
+| Video 2 | 1 | 826 / 880 | 1.09–1.16 |
+| Video 3 | 9 (was 16) | 820–884 | 1.09–**1.17** (worst: cand 8, 2,734 s, bottom panel `924:820`) |
+
+For video 3 candidate 1, the crops are now `954:848:0:52` and
+`966:858:954:222`. They touch at x=954 and do not overlap. The primary layout
+changed only for video 3 candidates 2, 3 and 4 (split → face-centred).
+Details: `work/session-20260925b/plan-after.json`.
+
+*Face-centred second-face check (report only; framing unchanged) [V].*
+Using the existing tracks, a face-centred crop is counted when it contains any
+part of another track's median box in the same shot:
+- **Benchmark:** 1 of 61 segments (cand 9, 3,970 s).
+- **Video 2:** 1 of 55 (cand 5, 731.5 s).
+- **Video 3:** 10 of 28.
+  - Nine are the stacked insets that now fall back on purpose.
+  - One is video 3 candidate 2, shot 0. `scdet` missed the cut from the
+    side-by-side call to the screen share, so the shot mixes both. The
+    face-centred crop at x=1,314 contains 86% of the guest's side-by-side face
+    box for the first ~10 s. This is a limitation of static per-shot layouts,
+    not something this fix addresses.
+
+*Too-close behaviour [I].* The planner falls back to face-centred on the
+longer track. The renderer rejects a split plan whose faces fail the same
+margin, as plan validation.
+
+*Stale-cache caveat [V, from `orchestrator.cache_key`].* Stage cache keys hash
+`StageSpec.version`, not the code. S7 and S8 are still at version 3 in
+`stages.py`, which was outside this session's file scope. A plain
+`maclips run` on a source that already has checkpoints therefore reuses the
+**old** plans and previews. `--from S7` forces a recompute; so does bumping S7
+and S8 to version 4, which is recommended.
 
 ## 7. Campaign workflow
 
