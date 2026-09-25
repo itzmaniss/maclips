@@ -98,3 +98,18 @@ def test_semantic_rules_are_human_checklist(brief):
     assert any("politics" in item for item in checklist)
     assert any("no music" in item for item in checklist)
     assert all("Human review" in item for item in checklist)
+
+
+def test_end_card_blocked_when_brief_forbids_overlays(brief, clip):
+    clip.update(hook_text="", end_card=True, end_card_text="Send this to someone")
+    validate_clip(clip, brief, "campaign")
+    brief["overlays_allowed"] = False
+    with pytest.raises(ComplianceError, match="end card overlay"):
+        validate_clip(clip, brief, "campaign")
+
+
+def test_end_card_is_not_classed_as_cta(brief, clip):
+    # PLAN.md §6.6 [I]: a share prompt is not a §1.4 CTA, pending the user's call.
+    clip.update(end_card=True, end_card_text="Send this to someone who needs to hear it")
+    brief["overlays_allowed"] = True
+    validate_clip(clip, brief, "campaign")

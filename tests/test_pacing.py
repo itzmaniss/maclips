@@ -234,6 +234,24 @@ def test_version_bump_forces_recompute(tmp_path):
     assert STAGES_BY_ID["S12"].version >= 3 and "S4" in STAGES_BY_ID["S7"].needs
 
 
+def test_end_card_is_timed_against_the_edited_end(tmp_path, monkeypatch):
+    # Integration with feat/end-card: the card covers the last 3 s of the *cut* clip.
+    speech = [w(str(i), 2.0 * i, 2.0 * i + .5) for i in range(10)]  # 1.5 s gaps, all cut
+    captured = {}
+    def duration_of(cmd):
+        return captured["d"]
+    source, commands, asses = fake_ffmpeg(monkeypatch, tmp_path, duration_of)
+    real = pacing.plan_pacing
+    def spy(*a, **k):
+        plan = real(*a, **k); captured["d"] = plan["duration"]; return plan
+    monkeypatch.setattr(render, "plan_pacing", spy)
+    render.render_clip(source, source, {"start": 0, "end": 18.5, "hook_text": "Hook", "end_card": True},
+                       speech, {"kind": "face-centred", "x": .5}, tmp_path / "card.mp4")
+    d = captured["d"]
+    assert d < 18.5 - 9 * 1.2
+    assert f"Dialogue: 1,{render._ass_time(d - 3)},{render._ass_time(d)},EndCard" in asses[0]
+
+
 def test_pacing_constants_are_config():
     assert (config.DEAD_AIR_GAP_S, config.DEAD_AIR_PAD_S, config.ZOOM_FACTOR,
             config.ZOOM_MIN_HOLD_S, config.ZOOM_PAUSE_S) == (0.8, 0.12, 1.15, 3.0, 1.5)

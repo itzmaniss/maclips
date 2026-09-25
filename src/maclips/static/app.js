@@ -66,7 +66,7 @@ if (editor) {
   const selectedLayout = () => layout.value;
   const edit = async extra => {
     if (startWord > endWord) throw new Error('In must come before out.');
-    await waitJob(await request(`/clips/${clipId}/edit`, {revision:Number(editor.dataset.revision),start_word:startWord, end_word:endWord, hook_text:$('#hook-text').value, layout:selectedLayout(), dead_air:$('#dead-air').checked, zoom:$('#zoom').checked, ...extra}));
+    await waitJob(await request(`/clips/${clipId}/edit`, {revision:Number(editor.dataset.revision),start_word:startWord, end_word:endWord, hook_text:$('#hook-text').value, layout:selectedLayout(), dead_air:$('#dead-air').checked, end_card:$('#end-card').checked, end_card_text:$('#end-card-text').value, zoom:$('#zoom').checked, ...extra}));
   };
   // Toggling re-renders only this clip's selected preview, like a trim.
   for (const id of ['#dead-air', '#zoom']) $(id).addEventListener('change', async () => { try { await edit({}); } catch (error) { notice(error.message, true); } });
@@ -85,6 +85,13 @@ if (editor) {
     else { try { await edit({}); } catch (error) { notice(error.message, true); } }
   });
   action($('#save-hook'), () => edit({}));
+  const endCard = $('#end-card');
+  endCard.addEventListener('change', async () => {
+    endCard.disabled = true;
+    try { await edit({}); } catch (error) { endCard.checked = !endCard.checked; notice(error.message, true); }
+    finally { endCard.disabled = false; }
+  });
+  action($('#save-end-card'), () => edit({}));
   async function decision(value, reason='') {
     const result = await request(`/clips/${clipId}/decision`, {revision:Number(editor.dataset.revision),decision:value, reason, platform:$('#platform').value, account:$('#account').value, account_class:$('#account-class').value, caption:$('#caption').value, layout:selectedLayout(), hook_text:$('#hook-text').value});
     await waitJob(result);

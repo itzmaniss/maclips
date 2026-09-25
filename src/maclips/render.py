@@ -53,7 +53,7 @@ def _text(value: object) -> str:
 
 def write_ass(path: Path, words: list[dict], start: float, end: float,
               hook: str, split: bool = False, diagnostic: bool = False,
-              segments: list[dict] | None = None) -> None:
+              segments: list[dict] | None = None, end_card: str = "") -> None:
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -64,6 +64,7 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
 Style: Caption,{config.CAPTION_FONT},58,&H00FFFFFF,&H0000FFFF,&H00101010,&H80000000,-1,0,0,0,100,100,0,0,1,3,1,2,65,65,{880 if split else 230},1
 Style: Hook,{config.CAPTION_FONT},65,&H00FFFFFF,&H0000FFFF,&H00101010,&H80000000,-1,0,0,0,100,100,0,0,1,3,1,8,80,80,180,1
 Style: Diagnostic,{config.CAPTION_FONT},32,&H0000FFFF,&H0000FFFF,&H00101010,&H80000000,-1,0,0,0,100,100,0,0,1,2,1,8,40,40,40,1
+{END_CARD_STYLE}
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
@@ -95,7 +96,37 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         lines.append(f"Dialogue: 1,0:00:00.00,{_ass_time(min(3, end-start))},Hook,,0,0,0,,{_text(hook)}\n")
     if diagnostic:
         lines.append(f"Dialogue: 2,0:00:00.00,{_ass_time(end-start)},Diagnostic,,0,0,0,,UNAPPROVED TEST RENDER\n")
+    # END-CARD TIMING DEPENDENCY: `end - start` must be the duration the
+    # renderer actually outputs. If cuts shorten the timeline, pass that value.
+    lines += _end_card_events(end_card, end - start, bool(hook))
     path.write_text("".join(lines))
+
+
+# Top band above faces and below the diagnostic label; captions sit at the
+# bottom (MarginV 230) or the split seam (880), never up here (PLAN.md §6.6).
+END_CARD_STYLE = (f"Style: EndCard,{config.CAPTION_FONT},52,&H00FFFFFF,&H0000FFFF,&H00101010,"
+                  "&H80000000,-1,0,0,0,100,100,0,0,1,3,1,8,80,80,100,1")
+
+
+def end_card_text(clip: dict) -> str:
+    """The burned-in share prompt for this clip, or "" when the card is off."""
+    if clip.get("end_card") is not True:
+        return ""
+    text = str(clip.get("end_card_text") or config.END_CARD_TEXT).strip()
+    if not text or len(text) > config.END_CARD_MAX_CHARS:
+        raise RenderError(f"end card text must be 1-{config.END_CARD_MAX_CHARS} characters")
+    return text
+
+
+def _end_card_events(text: str, duration: float, has_hook: bool) -> list[str]:
+    """Final END_CARD_SECONDS of the rendered duration; never alongside the hook."""
+    if not text:
+        return []
+    hook_end = min(3, duration) if has_hook else 0.0  # matches the Hook event
+    begin = duration - config.END_CARD_SECONDS
+    if begin < hook_end:
+        raise RenderError(f"clip too short for a {config.END_CARD_SECONDS:g}s end card after the hook")
+    return [f"Dialogue: 1,{_ass_time(begin)},{_ass_time(duration)},EndCard,,0,0,0,,{_text(text)}\n"]
 
 
 def _box(box: object) -> tuple[float, float, float, float]:
@@ -337,9 +368,11 @@ def render_clip(video: Path, audio: Path, candidate: dict, words: list[dict],
                                "end": duration if i == len(segments) - 1 else edited_time(s["end"], keeps)}
                               for i, s in enumerate(segments)]
                     mapped = [s for s in mapped if s["end"] > s["start"]]
-                write_ass(ass, timed, 0.0, duration, candidate.get("hook_text", ""), kind == "split", diagnostic, mapped)
+                write_ass(ass, timed, 0.0, duration, candidate.get("hook_text", ""), kind == "split", diagnostic, mapped,
+                          end_card=end_card_text(candidate))
             else:
-                write_ass(ass, words, start, end, candidate.get("hook_text", ""), kind == "split", diagnostic, segments)
+                write_ass(ass, words, start, end, candidate.get("hook_text", ""), kind == "split", diagnostic, segments,
+                          end_card=end_card_text(candidate))
             vf += f",setsar=1,ass=filename='{ass}'[v];"
             vf += _audio_graph(keeps, ss)
             fd, temporary = tempfile.mkstemp(prefix=".render-", suffix=".mp4", dir=outpath.parent)

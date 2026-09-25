@@ -97,3 +97,18 @@ def test_posted_clip_blocks_preview_regeneration(tmp_path,monkeypatch):
     monkeypatch.setattr(render,'render_clip',lambda *a,**kw:pytest.fail('posted clip rendered'))
     with pytest.raises(GateFailure,match='posted clip is immutable'):
         render_stages.proxy_render(ctx)
+
+
+@pytest.mark.parametrize('card',[False,True])
+def test_checklist_names_end_card_only_when_on(tmp_path,monkeypatch,card):
+    monkeypatch.setattr(config,'DB_PATH',tmp_path/'test.db')
+    source=tmp_path/'fixture.mp4';source.write_bytes(b'fixture video')
+    with db.connect(config.DB_PATH) as conn:
+        sid=db.register_source(conn,'abc',source,'general-own')
+        cid=db.save_candidate(conn,sid,'general-own',{'rank':1,'start':0,'end':30})
+        conn.execute("UPDATE clips SET review_decision='approved' WHERE id=?",(cid,))
+    ctx=RunContext('test',source,'hash',tmp_path/'work',{},outputs={'S0':{'clip_class':'general-own'},'S1':{},'S12':{'rendered':[
+        {'id':cid,'platform':'instagram','path':str(source),'caption':'c','account':'fixture','end_card':card,'end_card_text':'Share this one'}]}})
+    checklist=(Path(export.export_stage(ctx)['bundles'][0]['path'])/'checklist.md').read_text()
+    assert ('- End card burned into the last 3 s: "Share this one"' in checklist)==card
+    assert ('End card' in checklist)==card

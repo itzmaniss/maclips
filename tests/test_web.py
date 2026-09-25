@@ -139,3 +139,63 @@ def test_pacing_toggle_rerenders_only_that_preview_and_is_saved(studio,monkeypat
     with pytest.raises(ValueError,match='dead_air must be true or false'):
         web.edit_clip(cid,{'layout':'centre','dead_air':'no','revision':2})
     assert client.get('/',params={'tab':'review','source':sid}).status_code==200
+
+
+def fake_render(calls):
+    def fake(video,audio,candidate,words,layout,path,**kw):
+        calls.append(dict(candidate))
+        return {'path':str(path),'wall_s':0,'width':540,'height':960}
+    return fake
+
+
+def test_end_card_off_by_default_in_review(studio):
+    import re
+    client,headers,sid,cid=studio
+    page=client.get('/',params={'tab':'review','source':sid,'clip':cid}).text
+    box=re.search(r'<input id="end-card" type="checkbox"[^>]*>',page).group(0)
+    assert 'checked' not in box
+    assert f'value="{config.END_CARD_TEXT}"' in page
+    with db.connect(config.DB_PATH) as conn:
+        assert 'end_card' not in json.loads(conn.execute('SELECT data_json FROM clips WHERE id=?',(cid,)).fetchone()[0])
+
+
+def test_end_card_toggle_and_text_persist_and_rerender_one_preview(studio,monkeypatch):
+    client,headers,sid,cid=studio
+    from maclips import render
+    calls=[];monkeypatch.setattr(render,'render_clip',fake_render(calls))
+    web.edit_clip(cid,{'layout':'centre','end_card':True,'end_card_text':'  Share this one  '})
+    assert len(calls)==1 and calls[0]['end_card'] is True and calls[0]['end_card_text']=='Share this one'
+    web.edit_clip(cid,{'start_word':2,'end_word':28,'layout':'centre','revision':1})  # a trim keeps the card
+    assert calls[1]['end_card'] is True and calls[1]['end_card_text']=='Share this one'
+    with db.connect(config.DB_PATH) as conn:
+        data=json.loads(conn.execute('SELECT data_json FROM clips WHERE id=?',(cid,)).fetchone()[0])
+    assert (data['end_card'],data['end_card_text'],list(data['previews']))==(True,'Share this one',['centre'])
+    page=client.get('/',params={'tab':'review','source':sid,'clip':cid}).text
+    assert 'type="checkbox" checked' in page and 'value="Share this one"' in page
+    web.edit_clip(cid,{'layout':'centre','end_card':False,'revision':2})
+    assert calls[2]['end_card'] is False and len(calls)==3
+
+
+@pytest.mark.parametrize('payload,message',[({'end_card':'true'},'true or false'),
+    ({'end_card':True,'end_card_text':'  '},'end card text'),({'end_card':True,'end_card_text':'x'*61},'end card text')])
+def test_end_card_edit_input_is_validated_before_render(studio,monkeypatch,payload,message):
+    client,headers,sid,cid=studio
+    from maclips import render
+    monkeypatch.setattr(render,'render_clip',lambda *a,**kw:pytest.fail('rendered invalid end card'))
+    response=client.post(f'/clips/{cid}/edit',headers=headers,json={'layout':'centre',**payload})
+    assert response.status_code==400 and message in response.text
+
+
+def test_end_card_change_revokes_approval(studio,monkeypatch):
+    client,headers,sid,cid=studio
+    from maclips import render
+    monkeypatch.setattr(render,'render_clip',fake_render([]))
+    with db.connect(config.DB_PATH) as conn:
+        conn.execute("UPDATE clips SET review_decision='approved',render_path='final.mp4' WHERE id=?",(cid,))
+        conn.execute("INSERT INTO posts(clip_id,platform,account,status,bundle_path) VALUES(?,'instagram','a','draft','b')",(cid,))
+    web.edit_clip(cid,{'layout':'centre','end_card':True})
+    with db.connect(config.DB_PATH) as conn:
+        row=conn.execute('SELECT * FROM clips WHERE id=?',(cid,)).fetchone()
+        assert row['review_decision'] is None and row['render_path'] is None
+        assert json.loads(row['data_json'])['end_card'] is True
+        assert conn.execute('SELECT count(*) FROM posts WHERE clip_id=?',(cid,)).fetchone()[0]==0

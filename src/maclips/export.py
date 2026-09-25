@@ -5,6 +5,7 @@ from pathlib import Path
 from . import config, db
 from .compliance import ComplianceError, validate_clip, human_checklist
 from .orchestrator import GateFailure
+from .render import end_card_text
 
 
 def compliance_stage(ctx):
@@ -47,6 +48,9 @@ def export_stage(ctx):
         if ctx.output('S0')['clip_class']=='campaign':
             checklist += ['- [ ] Enable the platform paid-partnership / paid-promotion toggle.',
                           f'- [ ] Submit the post link within {window} minutes after posting.' if window else '- [ ] Check the original brief for the submission deadline.']
+        card=end_card_text(clip)
+        if card:
+            checklist.append(f'- End card burned into the last {config.END_CARD_SECONDS:g} s: "{card}"')
         checklist += ['- [ ] '+item for item in human_checklist(brief)]
         (target/'checklist.md').write_text('\n'.join(checklist)+'\n')
         with db.connect(config.DB_PATH) as conn:

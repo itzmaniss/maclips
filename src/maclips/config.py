@@ -152,3 +152,9 @@ ZOOM_PAUSE_S = 1.5        # pause that triggers a zoom when dead-air removal is 
 # Where S8 writes previews inside a source workdir. A session can point new
 # renders at a fresh folder so earlier previews stay for comparison.
 PREVIEW_DIR = os.getenv("MACLIPS_PREVIEW_DIR", "previews")
+
+# Share-prompt end card (PLAN.md §6.6). Off by default per clip; the text is
+# this constant unless the reviewer edits it. Never model-generated.
+END_CARD_TEXT = "Send this to someone who needs to hear it"
+END_CARD_SECONDS = 3.0
+END_CARD_MAX_CHARS = 60
