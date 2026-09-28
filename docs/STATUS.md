@@ -1,6 +1,6 @@
 # maclips status (read this first)
 
-Short, current state. `docs/PLAN.md` is the full reference (about 45k tokens). Read only the sections a task names. Labels: [V] verified, [R] retrieved from memory, [I] inferred, [U] unverified. Updated 2026-09-28 at `f374f50`, with 398 tests passing.
+Short, current state. `docs/PLAN.md` is the full reference (about 45k tokens). Read only the sections a task names. Labels: [V] verified, [R] retrieved from memory, [I] inferred, [U] unverified. Updated 2026-09-28 after the McConaughey bake-off (§5.2j), with 398 tests passing.
 
 ## What it is
 A local, semi-automated clipping tool for one M4 Pro Mac (48 GB) with a browser UI. It takes a long source (and a campaign brief when there is one), produces ranked 9:16 captioned previews, and gives them to a human for review. Then it does a one-pass final render and builds an export bundle. Posting is manual.
@@ -43,13 +43,13 @@ Stages are wired in `stages.py` and `orchestrator.py`, and the CLI is `cli.py`. 
   - end card and cold open (off / tease / payoff), both off by default.
 
 ## Waiting on the user (human gates)
-1. Rate blind sheet 1: `work/session-20260925-bakeoff/bakeoff-blind-sheet.md` (Sonnet low / Sonnet high / Gemma 26B / Gemma E4B on video 3).
-2. Rate blind sheet 2: `work/session-20260928-promptv3/v3-blind-sheet.md` (prompt v3, Sonnet low and Gemma 26B).
-3. Watch `previews-endfix/` for videos 2 and 3.
-4. Set $H (the hourly floor; placeholder $20) and run one real campaign end to end.
+1. Rate the McConaughey blind sheet: `work/session-20260928-mcc/mcc-blind-sheet.md` (23 entries; Sonnet low and Gemma 26B, current prompt and prompt v3; PLAN §5.2j). Sheets 1 and 2 (video 3) are withdrawn.
+2. Watch `previews-endfix/` for video 2.
+3. Set $H (the hourly floor; placeholder $20) and run one real campaign end to end.
 
 ## Open decisions
-- **The ≥5 gate at a requested count of 5 (prompt v3):** scale the floor, or request 6–7.
+- **The ≥5 gate at a requested count of 5 (prompt v3):** scale the floor, or request 6–7. `--candidates 7` worked in §5.2j (7 of 7 kept by both v3 arms).
+- **Gemma on a 2 h source:** with the current prompt, S5 failed (both replies were schema-invalid), and it needs a 28 GB peak (§5.2j).
 - **S8 face-box crash:** one out-of-frame Vision box stops S8 for the whole source. Proposed: clamp the boxes and fail per clip.
 - **Cold-open lines:** only 5 of 44 are valid. Proposed option A: trim in code to the shortest complete phrase of 1.5–4 s.
 - **Bare-fragment endings** ("I think."): no rule yet.
@@ -57,5 +57,6 @@ Stages are wired in `stages.py` and `orchestrator.py`, and the CLI is `cli.py`. 
 
 ## Data (gitignored, under `work/`)
 - Video 2 `BcrjhdSUv4Y`: `work/7899e5b0d2733cfe/`.
-- Video 3 `DZtGxNs9AVg`: `work/7f8b3b5213024774/`.
+- Video 3 `DZtGxNs9AVg`: `work/7f8b3b5213024774/`. **Dropped as a test source** (the user sees no clip potential).
+- McConaughey `y_woFP79F0Q` (117.8 min): `work/d2f20b01d8a424b7/`, real S0–S3. `work/2e56de08d8b8eee8/` is an old stub run; ignore it.
 - Never open `*blind-key.json`; only the user unblinds.

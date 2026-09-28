@@ -1679,6 +1679,87 @@ the CLI replay.
     its key.
   - The key, `v3-blind-key.json`, was written by script and not opened.
 
+### 5.2j Ranking bake-off on McConaughey, session 2026-09-28 [V]
+
+The user dropped video 3 as a test source ("I don't see any clip
+potential"), so sheets 1 and 2 are withdrawn. The comparison was redone on
+Chris Williamson × Matthew McConaughey, "Living with Confidence & Going All
+In" (`y_woFP79F0Q`, 117.8 min). Evidence is in
+`work/session-20260928-mcc/`: `arm-*.json`, the `raw-*` replies,
+`ledger.json`, `server-G.log`, `mem-G.log`, `timings.json` and `render-*.log`.
+
+**S0–S3 had to be run first [V].** `work/2e56de08d8b8eee8/` was a stub run from
+2026-09-20: every checkpoint had `stub: true`, and S3 had no words. The
+real workdir is `work/d2f20b01d8a424b7/`, keyed on the hash of the audio file.
+`ingest_s0_s3.py` ran `maclips run <url> --language en --clip-class general-own`,
+cut after S3, with the API disabled:
+- S0 0.08 s, a cache hit on the media already in `work/sources/`, so nothing
+  was downloaded;
+- S1 0.00 s (no brief);
+- S2 6.8 s;
+- S3 462.4 s (whisper plus alignment): 19,621 words, 3.6% weak, and the
+  language gate passed;
+- 473 s wall in total.
+
+**Arms.** All four used the Phase-1 post-processing (§6.7), `--clip-class
+general-own`, and the default 10–180 s range. The count is a run-level
+setting, `--candidates` (already in the CLI), so no code changed:
+- **cur** arms use the approved `PROMPT` and 12 clips (the CLI default);
+- **v3** arms use `PROMPT_V3` plus signals and request **7** clips, so that one
+  dropped clip can't trip the ≥5 floor.
+
+The prompts were 120,556 characters (cur) and 123,107 (v3). The CLI replay
+rebuilt both to the same length.
+
+| Arm | Model | Returned / kept | ≥5 gate | JSON attempts | Tokens in / out | Cost or wall | Median kept |
+|---|---|---|---|---|---|---|---|
+| S-cur | Sonnet 5, low effort, cur, 12 | 12 / 12 | pass | 1 | 44,902 / 1,845 | **$0.1083**, 22.6 s | 75.2 s |
+| S-v3 | Sonnet 5, low effort, v3, 7 | 7 / 7 | pass | 1 | 46,028 / 1,394 | **$0.1060**, 15.1 s | 113.9 s |
+| G-cur | `gemma-4-26B-A4B-it-qat-4bit`, local, thinking on, cur, 12 | — / 0 | **S5 fails** (schema-invalid after the retry) | 2, both rejected | 42,219 / 10,576, then 42,255 / 8,795 | 1,128 s | — |
+| G-v3 | same, v3, 7 | 7 / 7 | pass | 2 | 42,947 / 10,684, then 42,975 / 11,605 | 1,271 s | 32.6 s |
+
+- **Spend: $0.2143** (the two Sonnet arms), against a $0.40 cap. No retries.
+  The projection before S-v3 was $0.110 expected and $0.165 worst case (at
+  max_tokens 8,000). [I] The estimator used video 3's characters-per-token
+  ratio and undercounted this transcript's input by about 8% (42.4k
+  estimated, 46.0k actual). The worst case still fitted.
+- **G-cur failed as S5 would [V].** Reply 1 was a Markdown list of
+  `- start_word: …` fields, and reply 2 was a fenced bare JSON array. Both
+  were rejected with "missing a top-level 'candidates' array", so the arm
+  has no clips. The parser was not loosened. G-v3's reply 1 was also a
+  fenced bare array. Its retry was a fenced `{"candidates": …}` object,
+  which parsed. [I] On this 2× longer transcript the local model is one
+  malformed reply away from failing S5 on either prompt.
+- **Local throughput and memory** (`serve.sh` as in §5.2i): prefill at
+  287–324 tok/s, generation at 22.1–24.2 tok/s. Each call took 508–654 s,
+  and no single call came near the 25-minute stop. The peak footprint was
+  **28 GB**, up from 20 GB on video 3, with 42–43k prompt tokens. Nothing
+  else MPS-heavy ran, and the server was stopped afterwards.
+- **Spans.** S-v3 picks long spans: 75–179 s, with its first clip at
+  178.9 s, just under the 180 s cap. S-cur picks 56–143 s, and G-v3 23–52 s.
+- **Subscores.** Both v3 arms filled all four subscores for every clip.
+  - S-v3's range 15–20, and its hook_type varies (question 4, story 2,
+    statement 1).
+  - G-v3's are nearly flat at 20–25, often one value repeated across all
+    four, and every hook_type is "statement".
+  - [I] G-v3's subscores carry no information.
+- **Agreement is low.** Only 1 of S-cur's 12 clips overlaps an S-v3 clip by
+  more than 50%. The pairs S-cur/G-v3 and S-v3/G-v3 also share one clip each.
+- **Renders.** Each arm ran `maclips run … --from S5` in a scratch workdir
+  (`wd-<arm>`) with a scratch DB (`mcc.db`). S5 was replayed from the saved
+  replies and `litellm.completion` set to abort. The live checkpoints and
+  the Review DB were not touched.
+  - S4 took 24–68 s and S6 109–462 s. S6 was the long pole on this 4K source.
+  - No clip hit the §5.2h face-box stop, so there were no letterbox
+    fallbacks.
+  - Previews: `work/d2f20b01d8a424b7/bakeoff-mcc/arm-*/`.
+- **Blind sheet.** 26 kept clips were pooled into **23 entries** (3 merged).
+  - Sheet: `work/session-20260928-mcc/mcc-blind-sheet.md`.
+  - Previews: `work/d2f20b01d8a424b7/bakeoff-mcc/blind/Mnn.mp4`.
+  - It has the same rating columns as sheets 1 and 2.
+  - The key, `mcc-blind-key.json`, was written by script and not opened.
+- No winner is declared. The user rates the sheet.
+
 ### 5.2d Brief extraction fix, 2026-09-23 [V]
 
 **Diagnosis first.** Each of the 8 captured files was checked for the
