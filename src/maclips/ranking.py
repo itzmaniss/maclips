@@ -74,6 +74,10 @@ class Candidate:
     payoff_words: tuple[int | None, int | None] = (None, None)
     tease: dict[str, Any] | None = None
     payoff: dict[str, Any] | None = None
+    # Prompt v3 only (§5.2i): 0-25 subscores and a hook type. Display and log
+    # only, like hook_strength; never sorted, filtered or blended (§5.4).
+    subscores: dict[str, int | None] | None = None
+    hook_type: str | None = None
     # The model's raw span, kept for audit; start_word/end_word are snapped.
     model_start_word: int | None = None
     model_end_word: int | None = None
@@ -101,6 +105,7 @@ class Candidate:
             "tease": self.tease, "payoff": self.payoff,
             "model_start_word": self.model_start_word, "model_end_word": self.model_end_word,
             "boundary_notes": self.boundary_notes,
+            "subscores": self.subscores, "hook_type": self.hook_type,
         }
 
 
@@ -183,6 +188,79 @@ REQUIREMENTS
 {brief_block}
 Transcript:
 {transcript}"""
+
+
+SUBSCORES = ("hook_score", "engagement_score", "value_score", "shareability_score")
+HOOK_TYPES = ("question", "statement", "statistic", "story", "contrast", "none")
+
+RANKING_SCHEMA_V3 = {
+    "type": "object",
+    "properties": {"candidates": {"type": "array", "items": {
+        **RANKING_SCHEMA["properties"]["candidates"]["items"],
+        "properties": {
+            **RANKING_SCHEMA["properties"]["candidates"]["items"]["properties"],
+            **{name: {"type": "integer"} for name in SUBSCORES},
+            "hook_type": {"type": "string", "enum": list(HOOK_TYPES)},
+        },
+        "required": [*RANKING_SCHEMA["properties"]["candidates"]["items"]["required"],
+                     *SUBSCORES, "hook_type"],
+    }}},
+    "required": ["candidates"],
+    "additionalProperties": False,
+}
+"""Prompt v3's schema (§5.2i): RANKING_SCHEMA plus the four subscores and
+hook_type. `enum` is structured-output-safe; the 0-25 range is checked in
+parse_candidates, like hook_strength's 0-1."""
+
+# Prompt v3 (§5.2i), an experiment beside the approved PROMPT, which stays the
+# default. Ideas borrowed from supoclip (AGPL-3.0) as ideas only: the wording
+# here is our own and no text or code was copied.
+_V3_FIELDS = """- hook_score, engagement_score, value_score, shareability_score: integers
+  0-25, described under SCORES.
+- hook_type: one of question, statement, statistic, story, contrast, none.
+"""
+_V3_GUIDANCE = """
+WHAT A CLIP NEEDS
+A good clip moves through four beats: a setup, then a tension or a claim, then
+a specific detail that makes it concrete, then a payoff. When the strongest
+moment is a single line, widen the span to take in the nearest setup before it
+and the nearest payoff after it. Stop widening as soon as the topic shifts or
+the speaker starts repeating themselves.
+
+PREFER
+- claims that cut against what most people believe
+- mistakes, and the lesson the speaker took from them
+- concrete examples: numbers, names, specifics
+- before-and-after contrasts
+- results that surprised the speaker
+- a complete answer to a question worth asking
+
+AVOID
+- introductions, sponsor reads and calls to action
+- openings that stay vague about what is coming
+- quotes that only make sense with earlier context
+- points the speaker has already made
+- long, wandering background
+
+SCORES
+Each 0-25. They describe the clip; your order alone is the ranking.
+- hook_score: 0-6 the opening gives no reason to stay; 7-13 a mildly
+  interesting opening; 14-19 a clear question, claim or number within the
+  first seconds; 20-25 an opening a scrolling viewer cannot ignore.
+- engagement_score: 0-6 flat or hard to follow; 7-13 holds attention in
+  places; 14-19 keeps building to the payoff; 20-25 tension or emotion
+  throughout.
+- value_score: 0-6 nothing to take away; 7-13 a general point; 14-19 a
+  specific insight or method; 20-25 something the viewer can use or will
+  remember.
+- shareability_score: 0-6 nobody would pass it on; 7-13 of niche interest;
+  14-19 a viewer would send it to someone they know; 20-25 people will argue
+  about it or quote it.
+"""
+_V3_SIGNALS = """
+SIGNALS
+{signals}
+"""
 
 
 def build_transcript(words: Sequence[Any], with_speakers: bool = False) -> str:
@@ -384,6 +462,9 @@ def parse_candidates(raw: str) -> list[Candidate]:
             hook_strength=_unit(item.get("hook_strength")),
             tease_words=(_index(item.get("tease_start_word")), _index(item.get("tease_end_word"))),
             payoff_words=(_index(item.get("payoff_start_word")), _index(item.get("payoff_end_word"))),
+            subscores=({name: _subscore(item.get(name)) for name in SUBSCORES}
+                       if any(name in item for name in SUBSCORES) else None),
+            hook_type=item.get("hook_type") if item.get("hook_type") in HOOK_TYPES else None,
         ))
     return out
 
@@ -394,6 +475,13 @@ def _unit(value: Any) -> float | None:
         return None
     value = float(value)
     return value if math.isfinite(value) and 0.0 <= value <= 1.0 else None
+
+
+def _subscore(value: Any) -> int | None:
+    """A 0-25 prompt-v3 subscore, or None when it is missing or out of range."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return int(value) if value == int(value) and 0 <= value <= 25 else None
 
 
 def _index(value: Any) -> int | None:
@@ -544,14 +632,19 @@ def rank(
     max_duration_s: float = DEFAULT_MAX_DURATION_S,
     with_speakers: bool = False,
     brief_block: str = "",
+    template: str = PROMPT,
+    signals: str = "",
 ) -> tuple[list[Candidate], dict[str, Any]]:
-    """One ranking pass with a single retry, then a hard stop (§5.4 item 1)."""
+    """One ranking pass with a single retry, then a hard stop (§5.4 item 1).
+
+    `template` is PROMPT or PROMPT_V3; only v3 has a place for `signals`.
+    """
     transcript = build_transcript(words, with_speakers=with_speakers)
-    prompt = PROMPT.format(
+    prompt = template.format(
         count=count, transcript=transcript,
         min_duration=min_duration_s, max_duration=max_duration_s,
         min_words=int(min_duration_s * 2.5), max_words=int(max_duration_s * 2.5),
-        brief_block=brief_block,
+        brief_block=brief_block, signals=signals or "(none found)",
     )
 
     last_error = ""
@@ -572,6 +665,14 @@ def rank(
 
     raise RankingError(f"schema-invalid output after one retry: {last_error}")
 
+
+PROMPT_V3 = (PROMPT
+             .replace("- brief_flags: brief rules this clip might touch, else [].\n",
+                      "- brief_flags: brief rules this clip might touch, else [].\n" + _V3_FIELDS)
+             .replace("{brief_block}\nTranscript:", _V3_GUIDANCE + "{brief_block}" + _V3_SIGNALS + "\nTranscript:"))
+assert PROMPT_V3.count(_V3_FIELDS) == 1 and PROMPT_V3.count("SIGNALS") == 1
+PROMPT_VERSIONS = {"current": (PROMPT, RANKING_SCHEMA), "v3": (PROMPT_V3, RANKING_SCHEMA_V3)}
+V3_DEFAULT_COUNT = 5
 
 _RETRY_SUFFIX = ("\n\nYour previous reply could not be used ({error}). "
                  "Reply with just the JSON object described above.")

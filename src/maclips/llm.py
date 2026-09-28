@@ -130,19 +130,20 @@ def _with_model_hint(exc: Exception, model: str) -> Exception:
     return exc
 
 
-def rank_fn(prompt: str, usage_sink: list | None = None) -> str:
+def rank_fn(prompt: str, usage_sink: list | None = None, schema: dict | None = None) -> str:
     """The ranking tier (Sonnet), adaptive thinking at low effort. PLAN.md §5.2.
 
     Temperature is omitted: Sonnet 5 rejects any non-default sampling value.
     The reply is constrained to RANKING_SCHEMA by the API; ranking still
     parses and gates it, because the schema cannot check indices or spans.
+    `schema` replaces RANKING_SCHEMA for prompt v3 (§5.2i).
     """
     from .ranking import RANKING_SCHEMA
 
     return complete(prompt, model=config.RANKING_MODEL, json_only=True,
                     max_tokens=RANK_MAX_TOKENS, temperature=None,
                     reasoning_effort="low", usage_sink=usage_sink,
-                    json_schema=RANKING_SCHEMA)
+                    json_schema=schema or RANKING_SCHEMA)
 
 
 def brief_fn(prompt: str) -> str:

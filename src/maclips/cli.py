@@ -365,7 +365,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
             "clip_max_duration": clip_max,
             "expected_speaker_count": args.expected_speakers,
             "expected_language": args.language,
-            "candidate_count": args.candidates,
+            "candidate_count": args.candidates or (5 if getattr(args, "prompt_version", "current") == "v3" else 12),
+            "prompt_version": None if getattr(args, "prompt_version", "current") == "current" else args.prompt_version,
             "source_record": source_record,
             "full_diarization": args.full_diarization,
         },
@@ -439,7 +440,10 @@ def main() -> int:
     run.add_argument("--expected-speakers", type=int, default=None,
                      help="enables the S4 speaker-count gate")
     run.add_argument("--language", default=None, help="enables the S3 language gate")
-    run.add_argument("--candidates", type=int, default=12)
+    run.add_argument("--candidates", type=int, default=None,
+                     help="clips to ask the model for (default 12; 5 with --prompt-version v3)")
+    run.add_argument("--prompt-version", default="current", choices=["current", "v3"],
+                     help="S5 ranking prompt. v3 is an experiment (PLAN.md §5.2i); current is the approved one")
     run.add_argument("--brief", default=None, help="human-confirmed campaign JSON file")
     run.add_argument("--clip-min-duration",type=float,default=None)
     run.add_argument("--clip-max-duration",type=float,default=None)

@@ -341,18 +341,30 @@ def s5_rank(ctx: RunContext) -> StageOutput:
 
     brief = ctx.output("S1").get("brief") or {}
     usage: list = []
+    version = _cfg(ctx, "prompt_version") or "current"
+    if version not in ranking.PROMPT_VERSIONS:
+        raise GateFailure("S5", f"unknown prompt version {version!r}")
+    template, schema = ranking.PROMPT_VERSIONS[version]
+    signal_block = ""
+    if version == "v3":
+        # Hints for the model only (§5.2i); computed without a model.
+        from . import signals
+        peaks = signals.loud_peaks(signals.loud_seconds(Path(ctx.output("S2")["audio_path"])))
+        signal_block = signals.build(transcript.words, peaks)
 
     def call(prompt: str) -> str:
-        return rank_fn(prompt, usage_sink=usage)
+        # The current prompt's call is unchanged; only v3 swaps the schema.
+        return rank_fn(prompt, usage_sink=usage, **({"schema": schema} if version != "current" else {}))
 
     try:
         candidates, meta = ranking.rank(
             transcript.words,
             llm_fn=call,
-            count=int(_cfg(ctx, "candidate_count", 12)),
+            count=int(_cfg(ctx, "candidate_count") or (ranking.V3_DEFAULT_COUNT if version == "v3" else 12)),
             min_duration_s=float(brief.get("min_duration_s") or _cfg(ctx,"clip_min_duration") or ranking.DEFAULT_MIN_DURATION_S),
             max_duration_s=float(brief.get("max_duration_s") or _cfg(ctx,"clip_max_duration") or ranking.DEFAULT_MAX_DURATION_S),
             brief_block=_brief_block(brief),
+            template=template, signals=signal_block,
         )
     except ranking.RankingError as exc:
         raise GateFailure("S5", str(exc)) from exc
@@ -369,6 +381,7 @@ def s5_rank(ctx: RunContext) -> StageOutput:
     return {
         "candidates": [c.as_dict() for c in candidates],
         "usage": usage,
+        **({"prompt_version": version, "signals": signal_block} if version != "current" else {}),
         **{k: v for k, v in meta.items() if k != "insufficient"},
     }
 
@@ -557,6 +570,8 @@ STAGES: tuple[StageSpec, ...] = (
               # v3: exclusive end index, "..." not an end, run-on extension (§6.7).
               needs=("S1", "S3"), version=3,
               params=("stub_candidates", "stub_malformed_json", "candidate_count", "clip_min_duration", "clip_max_duration"),
+              # Prompt v3 (§5.2i) is an experiment; unset keeps every existing key.
+              optional_params=("prompt_version",),
               gate="Malformed JSON after one retry; fewer than 5 candidates survive"),
     StageSpec("S4", "diarize", "pyannote community-1 on candidate windows", s4_diarize,
               needs=("S5",),

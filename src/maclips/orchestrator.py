@@ -97,6 +97,8 @@ class StageSpec:
     params: tuple[str, ...] = ()
     gate: str = ""
     version: int = 1
+    optional_params: tuple[str, ...] = ()
+    """Hashed only when set, so adding one leaves every existing key unchanged."""
 
 
 @dataclass
@@ -163,6 +165,9 @@ def cache_key(spec: StageSpec, ctx: RunContext, upstream: Mapping[str, str]) -> 
     digest.update(f"{spec.id}:{spec.version}".encode())
     for name in spec.params:
         digest.update(f"{name}={_stable(ctx.config.get(name))}".encode())
+    for name in spec.optional_params:
+        if ctx.config.get(name) is not None:
+            digest.update(f"{name}={_stable(ctx.config.get(name))}".encode())
     for need in spec.needs:
         digest.update(f"{need}={upstream.get(need, '')}".encode())
     return digest.hexdigest()[:CACHE_KEY_LENGTH]

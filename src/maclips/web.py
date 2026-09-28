@@ -167,7 +167,7 @@ def run_source(payload,from_stage=None):
        from_stage=from_stage,expected_speakers=payload.get('expected_speakers'),language=payload.get('language') or None,
        candidates=int(payload.get('candidates') or 12),full_diarization=False,brief=brief,campaign_id=campaign_id,
        clip_min_duration=payload.get('min_duration_s'),clip_max_duration=payload.get('max_duration_s'),
-       length_preset=payload.get('length_preset') or 'default',on_stage=None)
+       length_preset=payload.get('length_preset') or 'default',prompt_version='current',on_stage=None)
     status=_cmd_run(args)
     if status: raise ValueError('Pipeline stopped; see the source stage status and gate reason.')
     return {'status':'complete'}

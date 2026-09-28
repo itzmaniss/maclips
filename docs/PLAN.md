@@ -1582,6 +1582,103 @@ post-processing (§6.7). Evidence is in `work/session-20260925-bakeoff/`:
   per clip. The user decides.
 - No winner is declared. The user rates the blind sheet.
 
+### 5.2i Ranking prompt v3 experiment, session 2026-09-28 [V]
+
+The user approved prompt v3 as an **experiment** on video 3. Production
+stays on the approved `PROMPT` until the user has rated sheet 2.
+
+**Licence note [V].** The ideas come from supoclip
+(`~/coding/AMC/supoclip`, `backend/src/ai.py` and
+`backend/src/media/timeline.py`), which is **AGPL-3.0**. Only ideas were
+borrowed. No code or prompt text was copied; the wording, word lists,
+weights and code are our own.
+
+**What changed.** `ranking.PROMPT_V3` is the approved `PROMPT` with every
+line kept (a test checks this). It adds:
+- two field lines: four integer subscores and `hook_type`;
+- **WHAT A CLIP NEEDS**: setup → tension or claim → specific detail →
+  payoff. A strong single line is widened to its nearest setup and payoff,
+  and widening stops when the topic shifts or the speaker repeats.
+- **PREFER** / **AVOID** lists;
+- **SCORES**: `hook_score`, `engagement_score`, `value_score` and
+  `shareability_score`, each 0–25 with four anchored bands, plus
+  `hook_type` (question / statement / statistic / story / contrast / none).
+  These are logged and shown in Review only, like `hook_strength`. They
+  never sort, filter or blend (§5.4);
+- a **SIGNALS** block.
+
+The v3 prompt asks for 5 clips. `RANKING_SCHEMA_V3` adds the five fields and
+uses only `enum` beyond the current keywords. Selecting v3:
+- `maclips run … --prompt-version v3` (default `current`);
+- S5's `optional_params`, hashed only when set, so every existing cache key
+  is unchanged (tested);
+- S5's output then records `prompt_version` and `signals`.
+
+**Signals** (`signals.py`, no model). There are up to 12 hint lines, each
+naming a transcript line by its `[n]` and never by timestamp. They come from:
+- a trigger-word list;
+- `?` and `!`;
+- first-person story-turn phrases;
+- a pause of ≥1.0 s before the line;
+- the 12 loudest seconds, 4 s apart, from a 1-second RMS scan of the S2 WAV
+  through `config.FFMPEG` (1.9 s for video 3's 70 minutes).
+
+A fixed tally only chooses which lines are shown. Diarization does not exist
+at S5, so there are no speaker signals, and the block says so. Video 3's
+block, as the model saw it:
+
+```
+Hints only, computed without a model from the transcript text and the audio loudness. No speaker labels exist at this stage, so there are no speaker signals. Use them to notice moments; judge every clip on the transcript itself.
+[1060] trigger word, one of the loudest moments
+[1509] trigger word, question
+[2872] trigger word, question
+[5795] trigger word, question
+[7458] trigger word, question
+[7550] trigger word, question
+[7573] trigger word, question
+[8371] trigger word, question
+[9238] trigger word, question
+[11030] trigger word, question
+[11038] trigger word, question
+[11804] trigger word, pause of 1.1s before it, one of the loudest moments
+```
+
+[I] Ten of the twelve lines are "trigger word, question", because "why"
+questions dominate the tally. Only 2 of the 12 loud seconds made the cut.
+
+**Runs** (`work/session-20260928-promptv3/`). Same Phase-1
+post-processing; the 75,431-character prompt matched the one S5 builds in
+the CLI replay.
+
+| Arm | Model | Returned / kept | ≥5 gate (floor = requested count) | JSON attempts | Tokens in / out | Cost or wall | Median kept |
+|---|---|---|---|---|---|---|---|
+| V3-S | Sonnet 5, low effort | 5 / 4 (1 was 196.8 s, over 180 s) | **fires** | 1 | 25,923 / 972 | **$0.0616**, 13.1 s | 101 s |
+| V3-G | `gemma-4-26B-A4B-it-qat-4bit`, local, thinking on | 5 / 5 | passes | 2 | 22,566 / 6,171, then 22,594 / 9,024 | 765 s | 32 s |
+
+- **Spend: $0.06** (V3-S only), against a $0.10 cap. The projection before
+  the call: max_tokens was set to 4,765 so the worst case ($0.10) fitted.
+- **The gate now sits at the requested count.** With 5 asked for, any single
+  drop stops S5. It fired for V3-S. The render harness lowered the floor to 1
+  in its own process only, so the four clips could be rated; the pipeline
+  code is unchanged. Before v3 goes to production, the user decides whether
+  the floor should scale with the count.
+- **V3-G ignores the schema**, as in §5.2h: its first reply was a bare array.
+  The retry parsed, but 4 of 5 candidates omitted `hook_score`, which is
+  stored as null. All 5 used `hook_type` "statement". V3-S gave all four
+  subscores for every clip.
+- V3-G throughput this time: prefill at 338–346 tok/s and generation at
+  23.5–24.8 tok/s. That is about half §5.2h's rates for the same model and
+  settings. [U] Cause unknown: nothing else MPS-heavy ran (checked with
+  pgrep). The peak footprint was 20 GB.
+- **Sheet 2.** 9 kept clips were pooled into **7 entries** (2 merged).
+  - Sheet: `work/session-20260928-promptv3/v3-blind-sheet.md`.
+  - Previews: `work/7f8b3b5213024774/bakeoff-v3/blind/Pnn.mp4`.
+  - It has the same rating columns as sheet 1.
+  - 6 of the 7 overlap a sheet-1 entry by more than 50% and are kept as
+    calibration. The key lists which, computed from sheet 1's headers, not
+    its key.
+  - The key, `v3-blind-key.json`, was written by script and not opened.
+
 ### 5.2d Brief extraction fix, 2026-09-23 [V]
 
 **Diagnosis first.** Each of the 8 captured files was checked for the
@@ -2756,6 +2853,13 @@ built and rendered, and one pooled blind sheet waits for the user (§5.2h).
 Spend was $0.26 of the $0.60 cap. mlx-lm is now a dependency, and the local
 slot routes S5 when `MACLIPS_LOCAL_LLM_ENABLED=true` and
 `MACLIPS_RANKING_MODEL=openai/<model>`.
+
+**Session 2026-09-28 prompt-v3 status [V]:** prompt v3 (supoclip ideas, no
+AGPL text or code) is built behind `--prompt-version v3`, with the approved
+prompt still the default. It ran on video 3 with Sonnet low ($0.06, where
+the ≥5 gate fired at 4 of 5) and Gemma 26B local (5 of 5). Sheet 2 has 7
+entries waiting for the user (§5.2i). The parked TRIBE v2 idea is in
+`docs/todo.md`.
 
 **Critical path to first earnings:** 1 → 2 → 4 → 5 → 6, with 3 and 8 in parallel.
 
